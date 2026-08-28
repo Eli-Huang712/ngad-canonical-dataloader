@@ -142,7 +142,7 @@ Dataset sample 保留 anchor 时刻的两个 canonical tactile tensor，并输�
 | 不读取落盘 action；future target 相对 current-frame anchor 计算 | **已实现** | `tcp_target_relative_to_anchor()` 实现 `R_anchor^T (p_target-p_anchor)` 与 `R_anchor^T R_target`；gripper 保留 target absolute openness。 |
 | action history 是过去 reached state 相对当前 anchor，不是历史 controller command | **已实现** | 过去 absolute state 与 future target 共用 `encode_action_targets()`，anchor 始终是 current state。 |
 | normalization 只读每个数据集的外部 JSON；训练时不扫描、不更新、无 stats fallback | **已实现** | `_normalization_transform()` 校验外部 JSON；构造 root 时缺失/非法即报错。 |
-| proprio XYZ 做 per-arm min/max；relative XYZ 除对称 scale；Rot6D 不变；openness clamp `[0,1]` | **已实现** | `tcp.py` 中 absolute/relative normalization 与飞书一致，absolute XYZ 输出最多保留到 `[-5,5]`。 |
+| proprio XYZ 做 per-arm min/max；relative XYZ 除对称 scale；Rot6D 不变；openness clamp `[0,1]` | **已实现** | `action.py` 中 absolute/relative normalization 与飞书一致，absolute XYZ 输出最多保留到 `[-5,5]`。 |
 | TCP20 写入 TCP128 的 `0:20`，保留维 `20:128` 为零 | **已实现** | `pack_dual_arm_tcp()`。 |
 | canonical element mask 映射到 TCP128 feature mask | **已实现** | 旧 `arm_mask[2]` 已删除；`element_mask_to_feature_mask()` 原样保留 state/action 的 20D validity 到 TCP128 `0:20`，`20:128` 为 false。 |
 
@@ -169,8 +169,7 @@ Dataset 时继续允许未知 `**extra`。真实 Lance/LeRobot root 的端到端
 | 独立仓库 | NGADv1pp 来源 |
 |---|---|
 | `ngad_canonical_dataloader/datasets/canonical.py` | `ngad/datasets/canonical.py` |
-| `ngad_canonical_dataloader/rotation.py` | `ngad/utils/rotation.py` |
-| `ngad_canonical_dataloader/tcp.py` | `ngad/utils/tcp.py` |
+| `ngad_canonical_dataloader/action.py` | `ngad/utils/rotation.py` + `ngad/utils/tcp.py` |
 | `ngad_canonical_dataloader/windows.py` | data-only functions from `ngad/utils/wam.py` |
 | `ngad_canonical_dataloader/memory.py` | `ngad/utils/wam_memory.py` |
 

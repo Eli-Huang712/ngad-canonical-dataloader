@@ -25,6 +25,9 @@ next decoupling pass, not an assertion that the current sample ABI is final or c
 - Added a required per-root `mask_path` sidecar. Camera/tactile field validity and state/action
   element validity now come from canonical masks rather than physical-backend inference.
 - Replaced `arm_mask[2]` with state/action element masks `[20]` and their direct TCP128 tensor masks.
+- Merged the extracted rotation and TCP helpers into one `action.py` module. It owns Rot6D
+  interpolation, anchor-relative pose construction, normalization, TCP128 packing and masks; the
+  previous `rotation.py` and `tcp.py` import paths no longer exist.
 - Fields declared unavailable may be physically absent; the Dataset emits deterministic black/zero
   tensors and explicit tensor masks without a backend fallback.
 - Real Lance/LeRobot root tests remain intentionally deferred; local syntax compilation is the only
