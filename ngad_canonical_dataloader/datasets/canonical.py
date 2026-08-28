@@ -161,7 +161,6 @@ def interpolate_canonical_tcp(
 class NGADCanonicalDataset(Dataset):
     """Read canonical TCP fields from Lance/JPEG or standard LeRobot video roots."""
 
-    normalization_stats_filename = "ngad_canonical_normalization_stats.json"
     expected_camera_keys = CANONICAL_CAMERA_KEYS
 
     def __init__(
@@ -275,11 +274,11 @@ class NGADCanonicalDataset(Dataset):
                 }
             )
 
-        physical_roots: list[tuple[Path, Path, dict[str, Any]]] = []
+        physical_roots: list[tuple[Path, dict[str, Any]]] = []
         for configured in configured_roots:
             configured_root = configured["path"]
             if (configured_root / "meta" / "info.json").is_file():
-                physical_roots.append((configured_root, configured_root, configured))
+                physical_roots.append((configured_root, configured))
                 continue
             fragment_infos = sorted(
                 configured_root.glob("table_*/fragments/*/meta/info.json")
@@ -291,11 +290,10 @@ class NGADCanonicalDataset(Dataset):
                     f"{configured_root} is not a supported canonical root or shard collection."
                 )
             physical_roots.extend(
-                (info_path.parent.parent, configured_root, configured)
+                (info_path.parent.parent, configured)
                 for info_path in fragment_infos
             )
 
-        self.roots = [physical_root for physical_root, _, _ in physical_roots]
         self.camera_keys = self.expected_camera_keys
         self.target_rgb_fps = float(target_rgb_fps)
         self.target_action_fps = float(target_action_fps)
@@ -329,7 +327,7 @@ class NGADCanonicalDataset(Dataset):
             mask_contract["pixel_mask"] = self._load_pixel_mask(mask_contract)
             mask_contracts[configured["name"]] = mask_contract
 
-        for root_index, (root, dataset_root, configured) in enumerate(physical_roots):
+        for root_index, (root, configured) in enumerate(physical_roots):
             info = _read_json_object(root / "meta" / "info.json")
             table_backend, image_backend = create_storage_backends(root, info)
             mask_contract = mask_contracts[configured["name"]]
@@ -348,7 +346,7 @@ class NGADCanonicalDataset(Dataset):
                     f"{root} source fps {source_fps} is not an integer multiple of "
                     f"target_rgb_fps {self.target_rgb_fps}; RGB anchors must be real frames."
                 )
-            tasks, episode_tasks, episodes = table_backend.read_catalog(
+            tasks, episodes = table_backend.read_catalog(
                 self.camera_keys, mask_contract["camera_mask"]
             )
             train_episodes, validation_episodes = split_episode_indices(
@@ -359,13 +357,9 @@ class NGADCanonicalDataset(Dataset):
             selected = train_episodes if split == "train" else validation_episodes
             self._root_meta.append(
                 {
-                    "root": root,
-                    "dataset_root": dataset_root,
                     "table_backend": table_backend,
                     "image_backend": image_backend,
-                    "info": info,
                     "tasks": tasks,
-                    "episode_tasks": episode_tasks,
                     "source_fps": source_fps,
                     "normalization_id": configured["name"],
                     "tcp_transform": transforms[configured["name"]],
@@ -883,7 +877,7 @@ class NGADCanonicalDataset(Dataset):
             -1,
             -1,
         ) & memory.long_valid[:, None, :, None, None]
-        task = meta["episode_tasks"].get(episode["episode_index"]) or meta["tasks"][task_index]
+        task = meta["tasks"][task_index]
         episode_timestamp_start = torch.as_tensor(
             rows[0]["timestamp"], dtype=torch.float64
         ).reshape(())

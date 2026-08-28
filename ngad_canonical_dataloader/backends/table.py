@@ -32,7 +32,7 @@ class LanceTableBackend:
         self,
         camera_keys: tuple[str, ...],
         camera_mask: torch.Tensor,
-    ) -> tuple[dict[int, str], dict[int, str], list[dict[str, Any]]]:
+    ) -> tuple[dict[int, str], list[dict[str, Any]]]:
         """Return tasks and episode offsets in the backend-neutral episode schema."""
         del camera_keys, camera_mask
         try:
@@ -60,7 +60,7 @@ class LanceTableBackend:
         for episode in episodes:
             if episode["dataset_to_index"] - episode["dataset_from_index"] != episode["length"]:
                 raise ValueError(f"Invalid Lance episode offsets under {self.root}: {episode}.")
-        return tasks, {}, sorted(episodes, key=lambda row: row["dataset_from_index"])
+        return tasks, sorted(episodes, key=lambda row: row["dataset_from_index"])
 
     def _dataset(self):
         """Open one worker-local Lance handle."""
@@ -142,7 +142,7 @@ class ParquetTableBackend:
         self,
         camera_keys: tuple[str, ...],
         camera_mask: torch.Tensor,
-    ) -> tuple[dict[int, str], dict[int, str], list[dict[str, Any]]]:
+    ) -> tuple[dict[int, str], list[dict[str, Any]]]:
         """Return tasks, episodes, Parquet offsets and per-camera video ranges."""
         try:
             import pyarrow.dataset as ds
@@ -221,7 +221,7 @@ class ParquetTableBackend:
                 episode["dataset_from_index"],
             )
             episodes.append(episode)
-        return tasks, {}, sorted(episodes, key=lambda record: record["dataset_from_index"])
+        return tasks, sorted(episodes, key=lambda record: record["dataset_from_index"])
 
     def _data_file(self, episode: dict[str, Any]):
         """Open the worker-local Parquet shard containing one episode."""
