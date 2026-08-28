@@ -36,13 +36,15 @@ from ngad_canonical_dataloader.memory import wam_memory_indices
 NGAD_CANONICAL_SCHEMA = "ngad_canonical_tcp_v1"
 HY_CANONICAL_SCHEMA = "ngad_hy_canonical_lance_v2"
 CANONICAL_CAMERA_KEYS = (
-    "observation.images.head_left",
-    "observation.images.head_right",
-    "observation.images.left_wrist_left",
-    "observation.images.left_wrist_right",
-    "observation.images.right_wrist_left",
-    "observation.images.right_wrist_right",
+    "observation.images.cam_head_left",
+    "observation.images.cam_head_right",
+    "observation.images.cam_left_wrist_left",
+    "observation.images.cam_left_wrist_right",
+    "observation.images.cam_right_wrist_left",
+    "observation.images.cam_right_wrist_right",
 )
+CANONICAL_TACTILE_VALUES_KEY = "observation.tactile.values"
+CANONICAL_TACTILE_DT_KEY = "observation.tactile.dt"
 CANONICAL_IMAGE_SIZE = 256
 DEFAULT_PROMPT = "A video recorded from a robot's point of view executing the following instruction: {task}"
 PIXEL_MASKS_FILENAME = "image_pixel_masks.npz"
@@ -506,12 +508,14 @@ class NGADCanonicalDataset(Dataset):
         expected = {
             "observation.state": [20],
             "action": [20],
+            CANONICAL_TACTILE_VALUES_KEY: [4, 3, 25, 6],
+            CANONICAL_TACTILE_DT_KEY: [4, 3],
             "timestamp": [1],
         }
         for name, shape in expected.items():
             if features.get(name, {}).get("shape") != shape:
                 raise ValueError(f"{root} feature {name} must have shape {shape}.")
-        expected_image_dtype = "image" if backend == "lance_jpeg" else "video"
+        expected_image_dtype = "video"
         for camera in self.camera_keys:
             feature = features.get(camera, {})
             if feature.get("dtype") != expected_image_dtype or feature.get("shape") != [256, 256, 3]:
@@ -702,6 +706,8 @@ class NGADCanonicalDataset(Dataset):
             "task_index",
             "timestamp",
             _lance_column("observation.state"),
+            _lance_column(CANONICAL_TACTILE_VALUES_KEY),
+            _lance_column(CANONICAL_TACTILE_DT_KEY),
             *[_lance_column(camera) for camera in self.camera_keys],
         ]
         table = self._lance_dataset(episode["root_index"]).take(
@@ -790,6 +796,8 @@ class NGADCanonicalDataset(Dataset):
             "task_index",
             "timestamp",
             "observation.state",
+            CANONICAL_TACTILE_VALUES_KEY,
+            CANONICAL_TACTILE_DT_KEY,
         ]
         by_row_group: dict[int, list[int]] = {}
         for local_row in sorted(local_rows):
@@ -1012,6 +1020,14 @@ class NGADCanonicalDataset(Dataset):
                 dtype=torch.float32,
             ))
             current_row = rows[int(observation_indices[0])]
+            tactile_values = torch.as_tensor(
+                current_row[_lance_column(CANONICAL_TACTILE_VALUES_KEY)],
+                dtype=torch.float32,
+            )
+            tactile_dt = torch.as_tensor(
+                current_row[_lance_column(CANONICAL_TACTILE_DT_KEY)],
+                dtype=torch.float32,
+            )
             arm_mask = meta["arm_mask"].clone()
             camera_mask = meta["camera_mask"].clone()
             all_cameras = [
@@ -1040,6 +1056,12 @@ class NGADCanonicalDataset(Dataset):
                 dtype=torch.float32,
             ))
             current_row = rows[int(observation_indices[0])]
+            tactile_values = torch.as_tensor(
+                current_row[CANONICAL_TACTILE_VALUES_KEY], dtype=torch.float32
+            )
+            tactile_dt = torch.as_tensor(
+                current_row[CANONICAL_TACTILE_DT_KEY], dtype=torch.float32
+            )
             arm_mask = meta["arm_mask"].clone()
             camera_mask = meta["camera_mask"].clone()
             all_cameras = [
@@ -1131,6 +1153,8 @@ class NGADCanonicalDataset(Dataset):
             "proprio_feature_mask": proprio_feature_mask,
             "action_history_feature_mask": action_history_feature_mask,
             "arm_mask": arm_mask,
+            CANONICAL_TACTILE_VALUES_KEY: tactile_values,
+            CANONICAL_TACTILE_DT_KEY: tactile_dt,
             "camera_view_mask": camera_mask,
             "image_pixel_mask": image_pixel_mask,
             "recent_memory_pixel_mask": recent_memory_pixel_mask,
