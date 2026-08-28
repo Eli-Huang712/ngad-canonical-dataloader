@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 from bisect import bisect_right
-from io import BytesIO
 import json
 import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
+from ngad_canonical_dataloader.backends import create_storage_backends
 from ngad_canonical_dataloader.action import (
     DUAL_ARM_TCP_FEATURE_DIM,
     WAM_FEATURE_DIM,
@@ -38,7 +37,6 @@ from ngad_canonical_dataloader.memory import wam_memory_indices
 
 
 NGAD_CANONICAL_SCHEMA = "ngad_canonical_tcp_v1"
-HY_CANONICAL_SCHEMA = "ngad_hy_canonical_lance_v2"
 CANONICAL_CAMERA_KEYS = (
     "observation.images.cam_head_left",
     "observation.images.cam_head_right",
@@ -68,11 +66,6 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"Expected a JSON object in {path}.")
     return value
-
-
-def _lance_column(key: str) -> str:
-    """Map canonical dotted feature names to Hy-compatible Lance columns."""
-    return key.replace(".", "_")
 
 
 class CanonicalTCPTransform:
@@ -338,7 +331,7 @@ class NGADCanonicalDataset(Dataset):
 
         for root_index, (root, dataset_root, configured) in enumerate(physical_roots):
             info = _read_json_object(root / "meta" / "info.json")
-            backend = self._detect_backend(root, info)
+            table_backend, image_backend = create_storage_backends(root, info)
             mask_contract = mask_contracts[configured["name"]]
             self._validate_features(root, info.get("features", {}), mask_contract)
             source_fps = float(info.get("fps", 0.0))
@@ -355,17 +348,9 @@ class NGADCanonicalDataset(Dataset):
                     f"{root} source fps {source_fps} is not an integer multiple of "
                     f"target_rgb_fps {self.target_rgb_fps}; RGB anchors must be real frames."
                 )
-            tasks, episode_tasks, episodes = self._read_metadata(
-                root, backend, mask_contract["camera_mask"]
+            tasks, episode_tasks, episodes = table_backend.read_catalog(
+                self.camera_keys, mask_contract["camera_mask"]
             )
-            data_file_starts: dict[tuple[int, int], int] = {}
-            if backend == "lerobot_v3":
-                for episode in episodes:
-                    file_key = (episode["data_chunk_index"], episode["data_file_index"])
-                    data_file_starts[file_key] = min(
-                        data_file_starts.get(file_key, episode["dataset_from_index"]),
-                        episode["dataset_from_index"],
-                    )
             train_episodes, validation_episodes = split_episode_indices(
                 [episode["episode_index"] for episode in episodes],
                 validation_split=float(validation_split),
@@ -376,15 +361,14 @@ class NGADCanonicalDataset(Dataset):
                 {
                     "root": root,
                     "dataset_root": dataset_root,
-                    "backend": backend,
+                    "table_backend": table_backend,
+                    "image_backend": image_backend,
                     "info": info,
                     "tasks": tasks,
                     "episode_tasks": episode_tasks,
                     "source_fps": source_fps,
                     "normalization_id": configured["name"],
                     "tcp_transform": transforms[configured["name"]],
-                    "data_file_starts": data_file_starts,
-                    "lance_path": root,
                     "field_mask": mask_contract["field_mask"],
                     "state_element_mask": mask_contract["state_element_mask"],
                     "action_element_mask": mask_contract["action_element_mask"],
@@ -426,23 +410,6 @@ class NGADCanonicalDataset(Dataset):
             "datasets": normalization_stats,
         }
         self._tcp_transforms = transforms
-        self._lance_handles: dict[int, Any] = {}
-        self._lance_pid = os.getpid()
-        self._parquet_handles: dict[tuple[int, int, int], Any] = {}
-        self._parquet_row_group_ends: dict[tuple[int, int, int], list[int]] = {}
-        self._parquet_pid = os.getpid()
-
-    @staticmethod
-    def _detect_backend(root: Path, info: dict[str, Any]) -> str:
-        if (
-            info.get("canonical_schema") == HY_CANONICAL_SCHEMA
-            and (root / "_versions").is_dir()
-            and len(list((root / "data").glob("*.lance"))) == 1
-        ):
-            return "lance_jpeg"
-        if info.get("data_path") and info.get("video_path"):
-            return "lerobot_v3"
-        raise ValueError(f"Cannot identify a supported NGAD canonical storage backend under {root}.")
 
     def _load_mask_contract(self, path: Path, dataset_name: str) -> dict[str, Any]:
         """Load one required canonical sidecar without backend-derived defaults."""
@@ -655,112 +622,6 @@ class NGADCanonicalDataset(Dataset):
                     f"{root} camera {camera} must be {expected_image_dtype} [256,256,3]."
                 )
 
-    def _read_metadata(
-        self,
-        root: Path,
-        backend: str,
-        camera_mask: torch.Tensor,
-    ) -> tuple[dict[int, str], dict[int, str], list[dict[str, Any]]]:
-        if backend == "lance_jpeg":
-            try:
-                import pyarrow.dataset as ds
-                import pyarrow.parquet as pq
-            except ImportError as error:
-                raise ImportError("Lance canonical metadata requires pyarrow.") from error
-            task_rows = pq.read_table(root / "meta" / "tasks.parquet").to_pylist()
-            tasks = {int(row["task_index"]): str(row["task"]) for row in task_rows}
-            episode_rows = ds.dataset(root / "meta" / "episodes", format="parquet").to_table(
-                columns=["episode_index", "length", "dataset_from_index", "dataset_to_index"]
-            ).to_pylist()
-            episodes = [
-                {
-                    "episode_index": int(row["episode_index"]),
-                    "length": int(row["length"]),
-                    "dataset_from_index": int(row["dataset_from_index"]),
-                    "dataset_to_index": int(row["dataset_to_index"]),
-                }
-                for row in episode_rows
-            ]
-            for episode in episodes:
-                if episode["dataset_to_index"] - episode["dataset_from_index"] != episode["length"]:
-                    raise ValueError(f"Invalid Lance episode offsets under {root}: {episode}.")
-            return tasks, {}, sorted(episodes, key=lambda row: row["dataset_from_index"])
-
-        try:
-            import pyarrow.dataset as ds
-            import pyarrow.parquet as pq
-        except ImportError as error:
-            raise ImportError("LeRobot v3 canonical metadata requires pyarrow.") from error
-
-        task_rows = pq.read_table(root / "meta" / "tasks.parquet").to_pylist()
-        tasks = {int(row["task_index"]): str(row["task"]) for row in task_rows}
-
-        video_columns = [
-            f"videos/{camera}/{field}"
-            for camera, available in zip(self.camera_keys, camera_mask.tolist())
-            if available
-            for field in ("chunk_index", "file_index", "from_timestamp", "to_timestamp")
-        ]
-        columns = [
-            "episode_index",
-            "tasks",
-            "length",
-            "data/chunk_index",
-            "data/file_index",
-            "dataset_from_index",
-            "dataset_to_index",
-            *video_columns,
-        ]
-        episode_rows = (
-            ds.dataset(root / "meta" / "episodes", format="parquet")
-            .to_table(columns=columns)
-            .to_pylist()
-        )
-        episodes: list[dict[str, Any]] = []
-        for row in episode_rows:
-            episode_index = int(row["episode_index"])
-            task_values = row["tasks"]
-            if not isinstance(task_values, list) or not task_values or not all(task_values):
-                raise ValueError(
-                    f"LeRobot v3 episode {episode_index} under {root} must list its tasks."
-                )
-            episode = {
-                "episode_index": episode_index,
-                "length": int(row["length"]),
-                "dataset_from_index": int(row["dataset_from_index"]),
-                "dataset_to_index": int(row["dataset_to_index"]),
-                "data_chunk_index": int(row["data/chunk_index"]),
-                "data_file_index": int(row["data/file_index"]),
-                "videos": {
-                    camera: {
-                        field: row[f"videos/{camera}/{field}"]
-                        for field in (
-                            "chunk_index",
-                            "file_index",
-                            "from_timestamp",
-                            "to_timestamp",
-                        )
-                    }
-                    for camera, available in zip(self.camera_keys, camera_mask.tolist())
-                    if available
-                },
-            }
-            if episode["dataset_to_index"] - episode["dataset_from_index"] != episode["length"]:
-                raise ValueError(f"Invalid LeRobot v3 episode offsets under {root}: {episode}.")
-            for camera, video in episode["videos"].items():
-                video["chunk_index"] = int(video["chunk_index"])
-                video["file_index"] = int(video["file_index"])
-                video["from_timestamp"] = float(video["from_timestamp"])
-                video["to_timestamp"] = float(video["to_timestamp"])
-                if video["to_timestamp"] <= video["from_timestamp"]:
-                    raise ValueError(
-                        f"Invalid LeRobot v3 video range for {camera} in episode {episode_index}."
-                    )
-            episodes.append(episode)
-        return tasks, {}, sorted(
-            episodes, key=lambda record: record["dataset_from_index"]
-        )
-
     @staticmethod
     def _normalization_transform(stats: dict[str, Any]) -> CanonicalTCPTransform:
         """Validate one external stats object and construct its source transform."""
@@ -804,171 +665,6 @@ class NGADCanonicalDataset(Dataset):
         previous_end = 0 if episode_position == 0 else self._episode_window_ends[episode_position - 1]
         return self._episodes[episode_position], int(index) - previous_end
 
-    def _lance_dataset(self, root_index: int):
-        pid = os.getpid()
-        if pid != self._lance_pid:
-            self._lance_handles = {}
-            self._lance_pid = pid
-        if root_index not in self._lance_handles:
-            try:
-                import lance
-            except ImportError as error:
-                raise ImportError("Lance canonical roots require the pylance package.") from error
-            self._lance_handles[root_index] = lance.dataset(
-                str(self._root_meta[root_index]["lance_path"])
-            )
-        return self._lance_handles[root_index]
-
-    def _take_lance_rows(
-        self,
-        episode: dict[str, int],
-        relative_indices: torch.Tensor,
-    ) -> dict[int, dict[str, Any]]:
-        try:
-            import pyarrow as pa
-        except ImportError as error:
-            raise ImportError("Lance canonical roots require pyarrow.") from error
-        offsets = {episode["dataset_from_index"]}
-        offsets.update(
-            episode["dataset_from_index"] + int(relative_index)
-            for relative_index in relative_indices.tolist()
-        )
-        offsets = sorted(offsets)
-        meta = self._root_meta[episode["root_index"]]
-        columns = [
-            "index",
-            "episode_index",
-            "frame_index",
-            "task_index",
-            "timestamp",
-            _lance_column(CANONICAL_STATE_KEY),
-        ]
-        columns.extend(
-            _lance_column(key)
-            for key in (CANONICAL_TACTILE_VALUES_KEY, CANONICAL_TACTILE_DT_KEY)
-            if meta["field_mask"][key]
-        )
-        columns.extend(
-            _lance_column(camera)
-            for camera, available in zip(self.camera_keys, meta["camera_mask"].tolist())
-            if available
-        )
-        table = self._lance_dataset(episode["root_index"]).take(
-            pa.array(offsets, type=pa.int64()), columns=columns
-        )
-        rows = table.to_pylist()
-        # Lance take() consumes fragment-local physical offsets, while canonical
-        # index remains global across fragments and episodes.
-        anchor_position = offsets.index(episode["dataset_from_index"])
-        global_index_start = int(rows[anchor_position]["index"])
-        by_relative_index: dict[int, dict[str, Any]] = {}
-        for offset, row in zip(offsets, rows):
-            relative_index = offset - episode["dataset_from_index"]
-            if (
-                int(row["index"]) != global_index_start + relative_index
-                or int(row["episode_index"]) != episode["episode_index"]
-                or int(row["frame_index"]) != relative_index
-            ):
-                raise RuntimeError(f"Canonical Lance row identity mismatch at offset {offset}.")
-            by_relative_index[relative_index] = row
-        return by_relative_index
-
-    def _lerobot_v3_data_file(self, episode: dict[str, Any]):
-        """Open the shared Parquet shard containing one LeRobot v3 episode."""
-        pid = os.getpid()
-        if pid != self._parquet_pid:
-            self._parquet_handles = {}
-            self._parquet_row_group_ends = {}
-            self._parquet_pid = pid
-        try:
-            import pyarrow.parquet as pq
-        except ImportError as error:
-            raise ImportError("LeRobot canonical roots require pyarrow.") from error
-
-        root_index = episode["root_index"]
-        chunk_index = episode["data_chunk_index"]
-        file_index = episode["data_file_index"]
-        cache_key = (root_index, chunk_index, file_index)
-        if cache_key in self._parquet_handles:
-            return self._parquet_handles[cache_key], self._parquet_row_group_ends[cache_key]
-
-        meta = self._root_meta[root_index]
-        info = meta["info"]
-        path = meta["root"] / str(info["data_path"]).format(
-            chunk_index=chunk_index,
-            file_index=file_index,
-        )
-        parquet_file = pq.ParquetFile(path)
-        row_group_ends: list[int] = []
-        row_count = 0
-        for row_group_index in range(parquet_file.num_row_groups):
-            row_count += parquet_file.metadata.row_group(row_group_index).num_rows
-            row_group_ends.append(row_count)
-        self._parquet_handles[cache_key] = parquet_file
-        self._parquet_row_group_ends[cache_key] = row_group_ends
-        return parquet_file, row_group_ends
-
-    def _take_lerobot_v3_rows(
-        self,
-        episode: dict[str, Any],
-        relative_indices: torch.Tensor,
-    ) -> dict[int, dict[str, Any]]:
-        """Read only requested episode rows from a shared LeRobot v3 Parquet shard."""
-        try:
-            import pyarrow as pa
-        except ImportError as error:
-            raise ImportError("LeRobot canonical roots require pyarrow.") from error
-
-        requested = {0}
-        requested.update(int(index) for index in relative_indices.tolist())
-        meta = self._root_meta[episode["root_index"]]
-        file_key = (episode["data_chunk_index"], episode["data_file_index"])
-        file_start = meta["data_file_starts"][file_key]
-        local_rows = {
-            episode["dataset_from_index"] + relative_index - file_start: relative_index
-            for relative_index in requested
-        }
-        parquet_file, row_group_ends = self._lerobot_v3_data_file(episode)
-        if not local_rows or min(local_rows) < 0 or max(local_rows) >= row_group_ends[-1]:
-            raise IndexError(f"LeRobot v3 episode offsets exceed their data shard: {episode}.")
-
-        columns = [
-            "index",
-            "episode_index",
-            "frame_index",
-            "task_index",
-            "timestamp",
-            CANONICAL_STATE_KEY,
-        ]
-        columns.extend(
-            key
-            for key in (CANONICAL_TACTILE_VALUES_KEY, CANONICAL_TACTILE_DT_KEY)
-            if meta["field_mask"][key]
-        )
-        by_row_group: dict[int, list[int]] = {}
-        for local_row in sorted(local_rows):
-            row_group_index = bisect_right(row_group_ends, local_row)
-            by_row_group.setdefault(row_group_index, []).append(local_row)
-
-        rows_by_relative_index: dict[int, dict[str, Any]] = {}
-        for row_group_index, group_rows in by_row_group.items():
-            group_start = 0 if row_group_index == 0 else row_group_ends[row_group_index - 1]
-            table = parquet_file.read_row_group(row_group_index, columns=columns)
-            table = table.take(pa.array([row - group_start for row in group_rows], type=pa.int64()))
-            for local_row, row in zip(group_rows, table.to_pylist()):
-                relative_index = local_rows[local_row]
-                global_index = episode["dataset_from_index"] + relative_index
-                if (
-                    int(row["index"]) != global_index
-                    or int(row["episode_index"]) != episode["episode_index"]
-                    or int(row["frame_index"]) != relative_index
-                ):
-                    raise RuntimeError(
-                        f"Canonical LeRobot v3 row identity mismatch at index {global_index}."
-                    )
-                rows_by_relative_index[relative_index] = row
-        return rows_by_relative_index
-
     def _validate_sample_timestamps(
         self,
         episode: dict[str, int],
@@ -990,27 +686,9 @@ class NGADCanonicalDataset(Dataset):
                 f"episode {episode['episode_index']}."
             )
 
-    def _decode_lance_camera(
-        self,
-        rows: dict[int, dict[str, Any]],
-        camera: str,
-        indices: torch.Tensor,
-    ) -> torch.Tensor:
-        frames = []
-        column = _lance_column(camera)
-        for index in indices.tolist():
-            payload = rows[int(index)][column]
-            with Image.open(BytesIO(payload)) as image:
-                image.load()
-                rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-            if rgb.shape != (256, 256, 3):
-                raise ValueError(f"Canonical JPEG {camera} frame {index} has shape {rgb.shape}.")
-            frames.append(torch.from_numpy(rgb.copy()).permute(2, 0, 1))
-        video = torch.stack(frames).float() / 127.5 - 1.0
-        return self._resize_video(video)
-
-    def _resize_video(self, video: torch.Tensor) -> torch.Tensor:
-        """Resize decoded camera frames to the model-facing square resolution."""
+    def _prepare_video(self, video: torch.Tensor) -> torch.Tensor:
+        """Normalize backend-neutral uint8 RGB frames and resize for the sample ABI."""
+        video = video.float() / 127.5 - 1.0
         return F.interpolate(
             video,
             size=(self.resolution, self.resolution),
@@ -1025,82 +703,6 @@ class NGADCanonicalDataset(Dataset):
             -1.0,
             dtype=torch.float32,
         )
-
-    @staticmethod
-    def _video_frame_rate(stream: Any, fallback: float) -> float:
-        """Use the nominal fixed rate instead of duration-skewed MP4 average rate."""
-        return float(stream.base_rate or stream.average_rate or fallback)
-
-    def _decode_video_camera(
-        self,
-        episode: dict[str, Any],
-        camera: str,
-        source_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        """Decode episode-relative frames from a shared LeRobot v3 MP4 shard."""
-        try:
-            import av
-        except ImportError as error:
-            raise ImportError("LeRobot canonical roots require PyAV.") from error
-        meta = self._root_meta[episode["root_index"]]
-        info = meta["info"]
-        video_meta = episode["videos"][camera]
-        video_path = meta["root"] / str(info["video_path"]).format(
-            video_key=camera,
-            chunk_index=video_meta["chunk_index"],
-            file_index=video_meta["file_index"],
-        )
-        requested_relative = [int(index) for index in source_indices.tolist()]
-        decoded: dict[int, torch.Tensor] = {}
-        with av.open(str(video_path)) as container:
-            stream = container.streams.video[0]
-            frame_rate = self._video_frame_rate(stream, float(info["fps"]))
-            source_fps = meta["source_fps"]
-            if abs(frame_rate - source_fps) > 1e-3:
-                raise ValueError(
-                    f"Video fps {frame_rate} does not match data fps {source_fps} in {video_path}."
-                )
-            time_base = float(stream.time_base)
-            start_pts = int(stream.start_time or 0)
-            requested = [
-                int(round((video_meta["from_timestamp"] + index / source_fps) * frame_rate))
-                for index in requested_relative
-            ]
-            if any(
-                video_meta["from_timestamp"] + index / source_fps
-                >= video_meta["to_timestamp"] + 1e-9
-                for index in requested_relative
-            ):
-                raise IndexError(
-                    f"Requested frame exceeds the episode video range for {camera} in "
-                    f"episode {episode['episode_index']}."
-                )
-            unique = set(requested)
-            first, last = min(unique), max(unique)
-            container.seek(
-                start_pts + int((first / frame_rate) / time_base),
-                stream=stream,
-                backward=True,
-                any_frame=False,
-            )
-            for frame in container.decode(stream):
-                if frame.pts is None:
-                    continue
-                frame_index = int(round((int(frame.pts) - start_pts) * time_base * frame_rate))
-                if frame_index < first:
-                    continue
-                if frame_index > last:
-                    break
-                if frame_index in unique and frame_index not in decoded:
-                    decoded[frame_index] = torch.from_numpy(frame.to_ndarray(format="rgb24"))
-                    if len(decoded) == len(unique):
-                        break
-        missing = sorted(unique.difference(decoded))
-        if missing:
-            raise RuntimeError(f"Failed to decode canonical frames {missing} from {video_path}.")
-        video = torch.stack([decoded[index] for index in requested]).permute(0, 3, 1, 2).float()
-        video = video / 127.5 - 1.0
-        return self._resize_video(video)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         episode, start = self._locate_window(index)
@@ -1153,96 +755,59 @@ class NGADCanonicalDataset(Dataset):
         requested = torch.unique(
             torch.cat([all_observation_indices, state_lower, state_upper]), sorted=True
         )
-        if meta["backend"] == "lance_jpeg":
-            rows = self._take_lance_rows(episode, requested)
-            source_timestamps = torch.tensor(
-                [rows[int(frame)]["timestamp"] for frame in requested.tolist()],
-                dtype=torch.float64,
-            ).reshape(-1)
-            self._validate_sample_timestamps(
-                episode,
-                requested,
-                source_timestamps,
-                torch.as_tensor(rows[0]["timestamp"], dtype=torch.float64).reshape(()),
-            )
-            lower_state = self._reshape_state_window(torch.tensor(
-                [rows[int(frame)][_lance_column(CANONICAL_STATE_KEY)] for frame in state_lower.tolist()],
-                dtype=torch.float32,
-            ))
-            upper_state = self._reshape_state_window(torch.tensor(
-                [rows[int(frame)][_lance_column(CANONICAL_STATE_KEY)] for frame in state_upper.tolist()],
-                dtype=torch.float32,
-            ))
-            current_row = rows[int(observation_indices[0])]
-            tactile_values = (
-                torch.as_tensor(
-                    current_row[_lance_column(CANONICAL_TACTILE_VALUES_KEY)],
-                    dtype=torch.float32,
+        rows = meta["table_backend"].read_rows(
+            episode,
+            requested,
+            meta["field_mask"],
+            self.camera_keys,
+            meta["camera_mask"],
+        )
+        source_timestamps = torch.tensor(
+            [rows[int(frame)]["timestamp"] for frame in requested.tolist()],
+            dtype=torch.float64,
+        ).reshape(-1)
+        self._validate_sample_timestamps(
+            episode,
+            requested,
+            source_timestamps,
+            torch.as_tensor(rows[0]["timestamp"], dtype=torch.float64).reshape(()),
+        )
+        lower_state = self._reshape_state_window(torch.tensor(
+            [rows[int(frame)][CANONICAL_STATE_KEY] for frame in state_lower.tolist()],
+            dtype=torch.float32,
+        ))
+        upper_state = self._reshape_state_window(torch.tensor(
+            [rows[int(frame)][CANONICAL_STATE_KEY] for frame in state_upper.tolist()],
+            dtype=torch.float32,
+        ))
+        current_row = rows[int(observation_indices[0])]
+        tactile_values = (
+            torch.as_tensor(current_row[CANONICAL_TACTILE_VALUES_KEY], dtype=torch.float32)
+            if meta["tactile_mask"][0]
+            else torch.zeros((4, 3, 25, 6), dtype=torch.float32)
+        )
+        tactile_dt = (
+            torch.as_tensor(current_row[CANONICAL_TACTILE_DT_KEY], dtype=torch.float32)
+            if meta["tactile_mask"][1]
+            else torch.zeros((4, 3), dtype=torch.float32)
+        )
+        all_cameras = [
+            (
+                self._prepare_video(
+                    meta["image_backend"].read_camera(
+                        rows,
+                        episode,
+                        camera,
+                        all_observation_indices,
+                        source_fps,
+                    )
                 )
-                if meta["tactile_mask"][0]
-                else torch.zeros((4, 3, 25, 6), dtype=torch.float32)
+                if available
+                else self._blank_video(all_observation_indices.numel())
             )
-            tactile_dt = (
-                torch.as_tensor(
-                    current_row[_lance_column(CANONICAL_TACTILE_DT_KEY)],
-                    dtype=torch.float32,
-                )
-                if meta["tactile_mask"][1]
-                else torch.zeros((4, 3), dtype=torch.float32)
-            )
-            all_cameras = [
-                (
-                    self._decode_lance_camera(rows, camera, all_observation_indices)
-                    if available
-                    else self._blank_video(all_observation_indices.numel())
-                )
-                for camera, available in zip(self.camera_keys, meta["camera_mask"].tolist())
-            ]
-            task_index = int(current_row["task_index"])
-        else:
-            rows = self._take_lerobot_v3_rows(episode, requested)
-            source_timestamps = torch.tensor(
-                [rows[int(frame)]["timestamp"] for frame in requested.tolist()],
-                dtype=torch.float64,
-            ).reshape(-1)
-            self._validate_sample_timestamps(
-                episode,
-                requested,
-                source_timestamps,
-                torch.as_tensor(rows[0]["timestamp"], dtype=torch.float64).reshape(()),
-            )
-            lower_state = self._reshape_state_window(torch.tensor(
-                [rows[int(frame)][CANONICAL_STATE_KEY] for frame in state_lower.tolist()],
-                dtype=torch.float32,
-            ))
-            upper_state = self._reshape_state_window(torch.tensor(
-                [rows[int(frame)][CANONICAL_STATE_KEY] for frame in state_upper.tolist()],
-                dtype=torch.float32,
-            ))
-            current_row = rows[int(observation_indices[0])]
-            tactile_values = (
-                torch.as_tensor(
-                    current_row[CANONICAL_TACTILE_VALUES_KEY], dtype=torch.float32
-                )
-                if meta["tactile_mask"][0]
-                else torch.zeros((4, 3, 25, 6), dtype=torch.float32)
-            )
-            tactile_dt = (
-                torch.as_tensor(
-                    current_row[CANONICAL_TACTILE_DT_KEY], dtype=torch.float32
-                )
-                if meta["tactile_mask"][1]
-                else torch.zeros((4, 3), dtype=torch.float32)
-            )
-            all_cameras = [
-                (
-                    self._decode_video_camera(episode, camera, all_observation_indices)
-                    if available
-                    else self._blank_video(all_observation_indices.numel())
-                )
-                for camera, available in zip(self.camera_keys, meta["camera_mask"].tolist())
-            ]
-            task_index = int(current_row["task_index"])
+            for camera, available in zip(self.camera_keys, meta["camera_mask"].tolist())
+        ]
+        task_index = int(current_row["task_index"])
 
         absolute_state_grid = interpolate_canonical_tcp(
             lower_state, upper_state, state_fraction

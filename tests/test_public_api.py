@@ -1,9 +1,13 @@
 import json
 
 import numpy as np
+import pytest
 import torch
 
 from ngad_canonical_dataloader import NGADCanonicalDataset
+from ngad_canonical_dataloader.backends import create_storage_backends
+from ngad_canonical_dataloader.backends.image import H264ImageBackend, JpegImageBackend
+from ngad_canonical_dataloader.backends.table import LanceTableBackend, ParquetTableBackend
 from ngad_canonical_dataloader.datasets.canonical import (
     CANONICAL_CAMERA_KEYS,
     CANONICAL_TACTILE_DT_KEY,
@@ -15,6 +19,29 @@ from ngad_canonical_dataloader.windows import wam_window_indices
 
 def test_dataset_classes_are_importable() -> None:
     assert NGADCanonicalDataset.__name__ == "NGADCanonicalDataset"
+
+
+def test_storage_backend_factory_selects_only_supported_physical_pairs(tmp_path) -> None:
+    lance_root = tmp_path / "lance"
+    (lance_root / "_versions").mkdir(parents=True)
+    (lance_root / "data").mkdir()
+    (lance_root / "data" / "canonical.lance").mkdir()
+    table_backend, image_backend = create_storage_backends(
+        lance_root,
+        {"canonical_schema": "ngad_hy_canonical_lance_v2"},
+    )
+    assert isinstance(table_backend, LanceTableBackend)
+    assert isinstance(image_backend, JpegImageBackend)
+
+    table_backend, image_backend = create_storage_backends(
+        tmp_path / "lerobot",
+        {"data_path": "data/{file_index}.parquet", "video_path": "videos/{video_key}.mp4"},
+    )
+    assert isinstance(table_backend, ParquetTableBackend)
+    assert isinstance(image_backend, H264ImageBackend)
+
+    with pytest.raises(ValueError, match="Cannot identify"):
+        create_storage_backends(tmp_path / "unknown", {})
 
 
 def test_canonical_feature_names_match_the_published_contract() -> None:
