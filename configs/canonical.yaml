@@ -2,9 +2,10 @@ schema_version: ngad_canonical_dataloader_v1
 
 dataset:
   dataset_dirs:
-    - name: canonical_train
-      path: /path/to/canonical/dataset
-      normalization_stats_path: /path/to/canonical/normalization_stats.json
+    - name: libero
+      path: /path/to/canonical/libero
+      mask_path: /path/to/canonical/libero/mask.json
+      normalization_stats_path: /path/to/stats/libero.json
 
   target_rgb_fps: 10
   target_action_fps: 20

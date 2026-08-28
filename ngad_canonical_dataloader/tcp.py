@@ -190,30 +190,19 @@ def pack_dual_arm_tcp(tcp: torch.Tensor) -> torch.Tensor:
     return packed
 
 
-def single_arm_feature_mask(*, device: torch.device | None = None) -> torch.Tensor:
-    """Activate only the single-arm TCP10 block of the canonical 128D ABI."""
-    mask = torch.zeros(WAM_FEATURE_DIM, dtype=torch.bool, device=device)
-    mask[:TCP_FEATURE_DIM] = True
-    return mask
-
-
-def dual_arm_feature_mask(*, device: torch.device | None = None) -> torch.Tensor:
-    """Activate the left/right TCP10 blocks and mask reserved slots 20:128."""
-    mask = torch.zeros(WAM_FEATURE_DIM, dtype=torch.bool, device=device)
-    mask[:DUAL_ARM_TCP_FEATURE_DIM] = True
-    return mask
-
-
-def arm_mask_to_feature_mask(arm_mask: torch.Tensor) -> torch.Tensor:
-    """Expand canonical left/right availability into the fixed TCP128 ABI."""
-    if arm_mask.shape[-1] != 2:
-        raise ValueError(f"arm_mask must end with two arm entries, got {tuple(arm_mask.shape)}.")
-    arm_mask = arm_mask.to(dtype=torch.bool)
-    expanded = arm_mask.unsqueeze(-1).expand(*arm_mask.shape, TCP_FEATURE_DIM).reshape(
-        *arm_mask.shape[:-1], DUAL_ARM_TCP_FEATURE_DIM
-    )
+def element_mask_to_feature_mask(element_mask: torch.Tensor) -> torch.Tensor:
+    """Place the canonical TCP20 element mask in the active TCP128 slots."""
+    if element_mask.shape[-1] != DUAL_ARM_TCP_FEATURE_DIM:
+        raise ValueError(
+            "Canonical element mask must end with 20 entries, "
+            f"got {tuple(element_mask.shape)}."
+        )
+    element_mask = element_mask.to(dtype=torch.bool)
     feature_mask = torch.zeros(
-        *arm_mask.shape[:-1], WAM_FEATURE_DIM, dtype=torch.bool, device=arm_mask.device
+        *element_mask.shape[:-1],
+        WAM_FEATURE_DIM,
+        dtype=torch.bool,
+        device=element_mask.device,
     )
-    feature_mask[..., :DUAL_ARM_TCP_FEATURE_DIM] = expanded
+    feature_mask[..., :DUAL_ARM_TCP_FEATURE_DIM] = element_mask
     return feature_mask

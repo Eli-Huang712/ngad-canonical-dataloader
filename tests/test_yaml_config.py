@@ -14,6 +14,7 @@ def test_example_yaml_matches_the_strict_config_contract() -> None:
     assert config.target_rgb_fps == 10
     assert config.target_action_fps == 20
     assert config.camera_keys == CANONICAL_CAMERA_KEYS
+    assert config.dataset_dirs[0].name == "libero"
+    assert config.dataset_dirs[0].mask_path == "/path/to/canonical/libero/mask.json"
     assert config.action_horizon == 32
     assert config.num_frames == 17
-

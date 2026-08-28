@@ -19,9 +19,9 @@ from ngad_canonical_dataloader import rotation as rotation_utils
 from ngad_canonical_dataloader.tcp import (
     DUAL_ARM_TCP_FEATURE_DIM,
     WAM_FEATURE_DIM,
-    arm_mask_to_feature_mask,
     denormalize_dual_arm_relative_tcp,
     dual_arm_tcp_target_relative_to_anchor,
+    element_mask_to_feature_mask,
     normalize_dual_arm_absolute_tcp,
     normalize_dual_arm_relative_tcp,
     pack_dual_arm_tcp,
@@ -45,9 +45,17 @@ CANONICAL_CAMERA_KEYS = (
 )
 CANONICAL_TACTILE_VALUES_KEY = "observation.tactile.values"
 CANONICAL_TACTILE_DT_KEY = "observation.tactile.dt"
+CANONICAL_STATE_KEY = "observation.state"
+CANONICAL_ACTION_KEY = "action"
+CANONICAL_IDENTITY_KEYS = (
+    "timestamp",
+    "frame_index",
+    "episode_index",
+    "index",
+    "task_index",
+)
 CANONICAL_IMAGE_SIZE = 256
 DEFAULT_PROMPT = "A video recorded from a robot's point of view executing the following instruction: {task}"
-PIXEL_MASKS_FILENAME = "image_pixel_masks.npz"
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -89,10 +97,10 @@ class CanonicalTCPTransform:
     def encode_proprio(
         self,
         absolute_state: torch.Tensor,
-        arm_mask: torch.Tensor,
+        state_element_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalize one absolute state and return its value and validity in TCP128."""
-        feature_mask = arm_mask_to_feature_mask(arm_mask)
+        feature_mask = element_mask_to_feature_mask(state_element_mask)
         normalized = normalize_dual_arm_absolute_tcp(
             self._flatten_state(absolute_state),
             self.state_xyz_min,
@@ -105,10 +113,10 @@ class CanonicalTCPTransform:
         self,
         anchor_state: torch.Tensor,
         absolute_state_targets: torch.Tensor,
-        arm_mask: torch.Tensor,
+        action_element_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode future states relative to one explicit current-frame anchor."""
-        feature_mask = arm_mask_to_feature_mask(arm_mask)
+        feature_mask = element_mask_to_feature_mask(action_element_mask)
         anchor = self._flatten_state(anchor_state)
         targets = self._flatten_state(absolute_state_targets)
         relative = dual_arm_tcp_target_relative_to_anchor(anchor.unsqueeze(0), targets)
@@ -246,11 +254,12 @@ class NGADCanonicalDataset(Dataset):
             if not isinstance(entry, dict) or set(entry) != {
                 "name",
                 "path",
+                "mask_path",
                 "normalization_stats_path",
             }:
                 raise TypeError(
-                    "Each dataset_dirs entry must contain exactly name, path, and "
-                    "normalization_stats_path."
+                    "Each dataset_dirs entry must contain exactly name, path, mask_path, "
+                    "and normalization_stats_path."
                 )
             name = str(entry["name"]).strip()
             if not name or name in dataset_names:
@@ -260,6 +269,9 @@ class NGADCanonicalDataset(Dataset):
                 {
                     "name": name,
                     "path": Path(os.path.expanduser(str(entry["path"]))).resolve(),
+                    "mask_path": Path(
+                        os.path.expanduser(str(entry["mask_path"]))
+                    ).resolve(),
                     "normalization_stats_path": Path(
                         os.path.expanduser(str(entry["normalization_stats_path"]))
                     ).resolve(),
@@ -303,22 +315,28 @@ class NGADCanonicalDataset(Dataset):
         self.aspect_ratio = {"1.00": [self.resolution, self.resolution]}
 
         self._root_meta: list[dict[str, Any]] = []
-        pixel_masks_by_dataset: dict[Path, torch.Tensor] = {}
         self._episodes: list[dict[str, Any]] = []
         self._episode_window_ends: list[int] = []
         total_windows = 0
         transforms: dict[str, CanonicalTCPTransform] = {}
         normalization_stats: dict[str, dict[str, Any]] = {}
+        mask_contracts: dict[str, dict[str, Any]] = {}
         for configured in configured_roots:
             stats = _read_json_object(configured["normalization_stats_path"])
             transform = self._normalization_transform(stats)
             transforms[configured["name"]] = transform
             normalization_stats[configured["name"]] = stats
+            mask_contract = self._load_mask_contract(
+                configured["mask_path"], configured["name"]
+            )
+            mask_contract["pixel_mask"] = self._load_pixel_mask(mask_contract)
+            mask_contracts[configured["name"]] = mask_contract
 
         for root_index, (root, dataset_root, configured) in enumerate(physical_roots):
             info = _read_json_object(root / "meta" / "info.json")
             backend = self._detect_backend(root, info)
-            self._validate_features(root, info.get("features", {}), backend)
+            mask_contract = mask_contracts[configured["name"]]
+            self._validate_features(root, info.get("features", {}), mask_contract)
             source_fps = float(info.get("fps", 0.0))
             if not np.isfinite(source_fps) or source_fps <= 0:
                 raise ValueError(f"{root} must declare a positive source fps.")
@@ -333,7 +351,9 @@ class NGADCanonicalDataset(Dataset):
                     f"{root} source fps {source_fps} is not an integer multiple of "
                     f"target_rgb_fps {self.target_rgb_fps}; RGB anchors must be real frames."
                 )
-            tasks, episode_tasks, episodes = self._read_metadata(root, backend)
+            tasks, episode_tasks, episodes = self._read_metadata(
+                root, backend, mask_contract["camera_mask"]
+            )
             data_file_starts: dict[tuple[int, int], int] = {}
             if backend == "lerobot_v3":
                 for episode in episodes:
@@ -348,8 +368,6 @@ class NGADCanonicalDataset(Dataset):
                 seed=int(validation_seed) + root_index,
             )
             selected = train_episodes if split == "train" else validation_episodes
-            if dataset_root not in pixel_masks_by_dataset:
-                pixel_masks_by_dataset[dataset_root] = self._load_pixel_masks(dataset_root)
             self._root_meta.append(
                 {
                     "root": root,
@@ -363,9 +381,12 @@ class NGADCanonicalDataset(Dataset):
                     "tcp_transform": transforms[configured["name"]],
                     "data_file_starts": data_file_starts,
                     "lance_path": root,
-                    "arm_mask": self._backend_masks(backend)[0],
-                    "camera_mask": self._backend_masks(backend)[1],
-                    "pixel_masks": pixel_masks_by_dataset[dataset_root],
+                    "field_mask": mask_contract["field_mask"],
+                    "state_element_mask": mask_contract["state_element_mask"],
+                    "action_element_mask": mask_contract["action_element_mask"],
+                    "camera_mask": mask_contract["camera_mask"],
+                    "tactile_mask": mask_contract["tactile_mask"],
+                    "pixel_mask": mask_contract["pixel_mask"],
                 }
             )
             for episode in episodes:
@@ -419,14 +440,107 @@ class NGADCanonicalDataset(Dataset):
             return "lerobot_v3"
         raise ValueError(f"Cannot identify a supported NGAD canonical storage backend under {root}.")
 
-    @staticmethod
-    def _backend_masks(backend: str) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return temporary arm validity and the fixed six-view canonical camera mask."""
-        if backend == "lance_jpeg":
-            return torch.tensor([True, True]), torch.ones(6, dtype=torch.bool)
-        if backend == "lerobot_v3":
-            return torch.tensor([True, False]), torch.ones(6, dtype=torch.bool)
-        raise ValueError(f"Unsupported canonical backend: {backend}.")
+    def _load_mask_contract(self, path: Path, dataset_name: str) -> dict[str, Any]:
+        """Load one required canonical sidecar without backend-derived defaults."""
+        value = _read_json_object(path)
+        expected_sections = {"dataset", "image_pixel_mask", "field_mask", "element_mask"}
+        if set(value) != expected_sections:
+            raise ValueError(f"{path} must contain exactly {sorted(expected_sections)}.")
+        if value["dataset"] != dataset_name:
+            raise ValueError(
+                f"{path} dataset must be {dataset_name!r}, got {value['dataset']!r}."
+            )
+
+        expected_fields = {
+            *self.camera_keys,
+            CANONICAL_STATE_KEY,
+            CANONICAL_ACTION_KEY,
+            CANONICAL_TACTILE_VALUES_KEY,
+            CANONICAL_TACTILE_DT_KEY,
+            *CANONICAL_IDENTITY_KEYS,
+        }
+        field_mask = value["field_mask"]
+        if not isinstance(field_mask, dict) or set(field_mask) != expected_fields:
+            raise ValueError(
+                f"{path} field_mask keys must exactly match {sorted(expected_fields)}."
+            )
+        if any(type(enabled) is not bool for enabled in field_mask.values()):
+            raise TypeError(f"{path} field_mask values must be bool.")
+        required_fields = {CANONICAL_STATE_KEY, *CANONICAL_IDENTITY_KEYS}
+        disabled_required = sorted(key for key in required_fields if not field_mask[key])
+        if disabled_required:
+            raise ValueError(
+                f"{path} disables fields required for window construction: {disabled_required}."
+            )
+
+        element_mask = value["element_mask"]
+        expected_elements = {CANONICAL_STATE_KEY, CANONICAL_ACTION_KEY}
+        if not isinstance(element_mask, dict) or set(element_mask) != expected_elements:
+            raise ValueError(
+                f"{path} element_mask keys must be {sorted(expected_elements)}."
+            )
+        element_tensors: dict[str, torch.Tensor] = {}
+        for key in (CANONICAL_STATE_KEY, CANONICAL_ACTION_KEY):
+            elements = element_mask[key]
+            if (
+                not isinstance(elements, list)
+                or len(elements) != DUAL_ARM_TCP_FEATURE_DIM
+                or any(type(enabled) is not bool for enabled in elements)
+            ):
+                raise ValueError(f"{path} element_mask[{key!r}] must be bool [20].")
+            if not field_mask[key] and any(elements):
+                raise ValueError(
+                    f"{path} marks {key} unavailable but enables some of its elements."
+                )
+            element_tensors[key] = torch.tensor(elements, dtype=torch.bool)
+        if torch.any(
+            element_tensors[CANONICAL_ACTION_KEY]
+            & ~element_tensors[CANONICAL_STATE_KEY]
+        ):
+            raise ValueError(
+                f"{path} enables action elements that cannot be reconstructed from state."
+            )
+
+        pixel = value["image_pixel_mask"]
+        expected_pixel_fields = {"path", "key", "shape", "applies_to_all_available_images"}
+        if not isinstance(pixel, dict) or set(pixel) != expected_pixel_fields:
+            raise ValueError(
+                f"{path} image_pixel_mask must contain exactly {sorted(expected_pixel_fields)}."
+            )
+        if pixel["shape"] != [CANONICAL_IMAGE_SIZE, CANONICAL_IMAGE_SIZE]:
+            raise ValueError(
+                f"{path} image_pixel_mask shape must be "
+                f"[{CANONICAL_IMAGE_SIZE},{CANONICAL_IMAGE_SIZE}]."
+            )
+        if pixel["applies_to_all_available_images"] is not True:
+            raise ValueError(
+                f"{path} image_pixel_mask must apply to all available images."
+            )
+        if not isinstance(pixel["path"], str) or not pixel["path"]:
+            raise ValueError(f"{path} image_pixel_mask.path must be a non-empty string.")
+        if not isinstance(pixel["key"], str) or not pixel["key"]:
+            raise ValueError(f"{path} image_pixel_mask.key must be a non-empty string.")
+
+        camera_mask = torch.tensor(
+            [field_mask[camera] for camera in self.camera_keys], dtype=torch.bool
+        )
+        if not torch.any(camera_mask):
+            raise ValueError(f"{path} must enable at least one canonical camera.")
+        return {
+            "field_mask": field_mask,
+            "camera_mask": camera_mask,
+            "tactile_mask": torch.tensor(
+                [
+                    field_mask[CANONICAL_TACTILE_VALUES_KEY],
+                    field_mask[CANONICAL_TACTILE_DT_KEY],
+                ],
+                dtype=torch.bool,
+            ),
+            "state_element_mask": element_tensors[CANONICAL_STATE_KEY],
+            "action_element_mask": element_tensors[CANONICAL_ACTION_KEY],
+            "pixel_mask_path": (path.parent / pixel["path"]).resolve(),
+            "pixel_mask_key": pixel["key"],
+        }
 
     @staticmethod
     def _reshape_state_window(absolute_state: torch.Tensor) -> torch.Tensor:
@@ -438,27 +552,29 @@ class NGADCanonicalDataset(Dataset):
             )
         return absolute_state.reshape(absolute_state.shape[0], 2, 10)
 
-    def _load_pixel_masks(self, dataset_root: Path) -> torch.Tensor:
-        """Load one static per-camera validity mask and align it with decoded RGB size."""
-        path = dataset_root / PIXEL_MASKS_FILENAME
+    def _load_pixel_mask(self, contract: dict[str, Any]) -> torch.Tensor:
+        """Load the single pixel mask shared by every available canonical camera."""
+        path = contract["pixel_mask_path"]
+        key = contract["pixel_mask_key"]
         with np.load(path, allow_pickle=False) as archive:
-            if set(archive.files) != set(self.camera_keys):
+            if key not in archive.files:
+                raise ValueError(f"{path} does not contain image pixel mask key {key!r}.")
+            mask = archive[key]
+            if mask.dtype != np.bool_ or mask.shape != (
+                CANONICAL_IMAGE_SIZE,
+                CANONICAL_IMAGE_SIZE,
+            ):
                 raise ValueError(
-                    f"{path} keys must exactly match canonical cameras {self.camera_keys}."
+                    f"{path} mask {key!r} must be bool "
+                    f"[{CANONICAL_IMAGE_SIZE},{CANONICAL_IMAGE_SIZE}]."
                 )
-            masks = []
-            for camera in self.camera_keys:
-                mask = archive[camera]
-                if mask.dtype != np.bool_ or mask.shape != (256, 256):
-                    raise ValueError(f"{path} mask {camera} must be bool [256,256].")
-                masks.append(torch.from_numpy(mask.copy()))
-        pixel_masks = torch.stack(masks).unsqueeze(1).float()
-        pixel_masks = F.interpolate(
-            pixel_masks,
+        pixel_mask = torch.from_numpy(mask.copy()).unsqueeze(0).unsqueeze(0).float()
+        pixel_mask = F.interpolate(
+            pixel_mask,
             size=(self.resolution, self.resolution),
             mode="nearest",
         )
-        return pixel_masks[:, 0].bool()
+        return pixel_mask[0, 0].bool()
 
     @staticmethod
     def _target_episode_length(
@@ -504,19 +620,31 @@ class NGADCanonicalDataset(Dataset):
         fraction = torch.where(lower == upper, torch.zeros_like(fraction), fraction)
         return lower, upper, fraction
 
-    def _validate_features(self, root: Path, features: dict[str, Any], backend: str) -> None:
+    def _validate_features(
+        self,
+        root: Path,
+        features: dict[str, Any],
+        contract: dict[str, Any],
+    ) -> None:
+        """Validate only fields declared available by the canonical mask sidecar."""
         expected = {
-            "observation.state": [20],
-            "action": [20],
+            CANONICAL_STATE_KEY: [20],
+            CANONICAL_ACTION_KEY: [20],
             CANONICAL_TACTILE_VALUES_KEY: [4, 3, 25, 6],
             CANONICAL_TACTILE_DT_KEY: [4, 3],
             "timestamp": [1],
+            "frame_index": [1],
+            "episode_index": [1],
+            "index": [1],
+            "task_index": [1],
         }
         for name, shape in expected.items():
-            if features.get(name, {}).get("shape") != shape:
+            if contract["field_mask"][name] and features.get(name, {}).get("shape") != shape:
                 raise ValueError(f"{root} feature {name} must have shape {shape}.")
         expected_image_dtype = "video"
-        for camera in self.camera_keys:
+        for camera, available in zip(self.camera_keys, contract["camera_mask"].tolist()):
+            if not available:
+                continue
             feature = features.get(camera, {})
             if feature.get("dtype") != expected_image_dtype or feature.get("shape") != [256, 256, 3]:
                 raise ValueError(
@@ -527,6 +655,7 @@ class NGADCanonicalDataset(Dataset):
         self,
         root: Path,
         backend: str,
+        camera_mask: torch.Tensor,
     ) -> tuple[dict[int, str], dict[int, str], list[dict[str, Any]]]:
         if backend == "lance_jpeg":
             try:
@@ -564,7 +693,8 @@ class NGADCanonicalDataset(Dataset):
 
         video_columns = [
             f"videos/{camera}/{field}"
-            for camera in self.camera_keys
+            for camera, available in zip(self.camera_keys, camera_mask.tolist())
+            if available
             for field in ("chunk_index", "file_index", "from_timestamp", "to_timestamp")
         ]
         columns = [
@@ -607,7 +737,8 @@ class NGADCanonicalDataset(Dataset):
                             "to_timestamp",
                         )
                     }
-                    for camera in self.camera_keys
+                    for camera, available in zip(self.camera_keys, camera_mask.tolist())
+                    if available
                 },
             }
             if episode["dataset_to_index"] - episode["dataset_from_index"] != episode["length"]:
@@ -699,17 +830,25 @@ class NGADCanonicalDataset(Dataset):
             for relative_index in relative_indices.tolist()
         )
         offsets = sorted(offsets)
+        meta = self._root_meta[episode["root_index"]]
         columns = [
             "index",
             "episode_index",
             "frame_index",
             "task_index",
             "timestamp",
-            _lance_column("observation.state"),
-            _lance_column(CANONICAL_TACTILE_VALUES_KEY),
-            _lance_column(CANONICAL_TACTILE_DT_KEY),
-            *[_lance_column(camera) for camera in self.camera_keys],
+            _lance_column(CANONICAL_STATE_KEY),
         ]
+        columns.extend(
+            _lance_column(key)
+            for key in (CANONICAL_TACTILE_VALUES_KEY, CANONICAL_TACTILE_DT_KEY)
+            if meta["field_mask"][key]
+        )
+        columns.extend(
+            _lance_column(camera)
+            for camera, available in zip(self.camera_keys, meta["camera_mask"].tolist())
+            if available
+        )
         table = self._lance_dataset(episode["root_index"]).take(
             pa.array(offsets, type=pa.int64()), columns=columns
         )
@@ -795,10 +934,13 @@ class NGADCanonicalDataset(Dataset):
             "frame_index",
             "task_index",
             "timestamp",
-            "observation.state",
-            CANONICAL_TACTILE_VALUES_KEY,
-            CANONICAL_TACTILE_DT_KEY,
+            CANONICAL_STATE_KEY,
         ]
+        columns.extend(
+            key
+            for key in (CANONICAL_TACTILE_VALUES_KEY, CANONICAL_TACTILE_DT_KEY)
+            if meta["field_mask"][key]
+        )
         by_row_group: dict[int, list[int]] = {}
         for local_row in sorted(local_rows):
             row_group_index = bisect_right(row_group_ends, local_row)
@@ -870,6 +1012,14 @@ class NGADCanonicalDataset(Dataset):
             size=(self.resolution, self.resolution),
             mode="bilinear",
             align_corners=False,
+        )
+
+    def _blank_video(self, frame_count: int) -> torch.Tensor:
+        """Create the canonical black value for a camera disabled by field_mask."""
+        return torch.full(
+            (frame_count, 3, self.resolution, self.resolution),
+            -1.0,
+            dtype=torch.float32,
         )
 
     @staticmethod
@@ -1012,27 +1162,37 @@ class NGADCanonicalDataset(Dataset):
                 torch.as_tensor(rows[0]["timestamp"], dtype=torch.float64).reshape(()),
             )
             lower_state = self._reshape_state_window(torch.tensor(
-                [rows[int(frame)][_lance_column("observation.state")] for frame in state_lower.tolist()],
+                [rows[int(frame)][_lance_column(CANONICAL_STATE_KEY)] for frame in state_lower.tolist()],
                 dtype=torch.float32,
             ))
             upper_state = self._reshape_state_window(torch.tensor(
-                [rows[int(frame)][_lance_column("observation.state")] for frame in state_upper.tolist()],
+                [rows[int(frame)][_lance_column(CANONICAL_STATE_KEY)] for frame in state_upper.tolist()],
                 dtype=torch.float32,
             ))
             current_row = rows[int(observation_indices[0])]
-            tactile_values = torch.as_tensor(
-                current_row[_lance_column(CANONICAL_TACTILE_VALUES_KEY)],
-                dtype=torch.float32,
+            tactile_values = (
+                torch.as_tensor(
+                    current_row[_lance_column(CANONICAL_TACTILE_VALUES_KEY)],
+                    dtype=torch.float32,
+                )
+                if meta["tactile_mask"][0]
+                else torch.zeros((4, 3, 25, 6), dtype=torch.float32)
             )
-            tactile_dt = torch.as_tensor(
-                current_row[_lance_column(CANONICAL_TACTILE_DT_KEY)],
-                dtype=torch.float32,
+            tactile_dt = (
+                torch.as_tensor(
+                    current_row[_lance_column(CANONICAL_TACTILE_DT_KEY)],
+                    dtype=torch.float32,
+                )
+                if meta["tactile_mask"][1]
+                else torch.zeros((4, 3), dtype=torch.float32)
             )
-            arm_mask = meta["arm_mask"].clone()
-            camera_mask = meta["camera_mask"].clone()
             all_cameras = [
-                self._decode_lance_camera(rows, camera, all_observation_indices)
-                for camera in self.camera_keys
+                (
+                    self._decode_lance_camera(rows, camera, all_observation_indices)
+                    if available
+                    else self._blank_video(all_observation_indices.numel())
+                )
+                for camera, available in zip(self.camera_keys, meta["camera_mask"].tolist())
             ]
             task_index = int(current_row["task_index"])
         else:
@@ -1048,44 +1208,58 @@ class NGADCanonicalDataset(Dataset):
                 torch.as_tensor(rows[0]["timestamp"], dtype=torch.float64).reshape(()),
             )
             lower_state = self._reshape_state_window(torch.tensor(
-                [rows[int(frame)]["observation.state"] for frame in state_lower.tolist()],
+                [rows[int(frame)][CANONICAL_STATE_KEY] for frame in state_lower.tolist()],
                 dtype=torch.float32,
             ))
             upper_state = self._reshape_state_window(torch.tensor(
-                [rows[int(frame)]["observation.state"] for frame in state_upper.tolist()],
+                [rows[int(frame)][CANONICAL_STATE_KEY] for frame in state_upper.tolist()],
                 dtype=torch.float32,
             ))
             current_row = rows[int(observation_indices[0])]
-            tactile_values = torch.as_tensor(
-                current_row[CANONICAL_TACTILE_VALUES_KEY], dtype=torch.float32
+            tactile_values = (
+                torch.as_tensor(
+                    current_row[CANONICAL_TACTILE_VALUES_KEY], dtype=torch.float32
+                )
+                if meta["tactile_mask"][0]
+                else torch.zeros((4, 3, 25, 6), dtype=torch.float32)
             )
-            tactile_dt = torch.as_tensor(
-                current_row[CANONICAL_TACTILE_DT_KEY], dtype=torch.float32
+            tactile_dt = (
+                torch.as_tensor(
+                    current_row[CANONICAL_TACTILE_DT_KEY], dtype=torch.float32
+                )
+                if meta["tactile_mask"][1]
+                else torch.zeros((4, 3), dtype=torch.float32)
             )
-            arm_mask = meta["arm_mask"].clone()
-            camera_mask = meta["camera_mask"].clone()
             all_cameras = [
-                self._decode_video_camera(episode, camera, all_observation_indices)
-                for camera in self.camera_keys
+                (
+                    self._decode_video_camera(episode, camera, all_observation_indices)
+                    if available
+                    else self._blank_video(all_observation_indices.numel())
+                )
+                for camera, available in zip(self.camera_keys, meta["camera_mask"].tolist())
             ]
             task_index = int(current_row["task_index"])
 
         absolute_state_grid = interpolate_canonical_tcp(
             lower_state, upper_state, state_fraction
         )
+        state_element_mask = meta["state_element_mask"].clone()
+        action_element_mask = meta["action_element_mask"].clone()
+        camera_mask = meta["camera_mask"].clone()
+        tactile_mask = meta["tactile_mask"].clone()
         tcp_transform = meta["tcp_transform"]
         action, action_feature_mask = tcp_transform.encode_action_targets(
             absolute_state_grid[0],
             absolute_state_grid[1 : 1 + self.action_horizon],
-            arm_mask,
+            action_element_mask,
         )
         proprio, proprio_feature_mask = tcp_transform.encode_proprio(
-            absolute_state_grid[0], arm_mask
+            absolute_state_grid[0], state_element_mask
         )
         action_history, action_history_feature_mask = tcp_transform.encode_action_targets(
             absolute_state_grid[0],
             absolute_state_grid[1 + self.action_horizon :],
-            arm_mask,
+            state_element_mask,
         )
         action_history = action_history * memory.action_history_valid[:, None].to(
             action_history.dtype
@@ -1124,7 +1298,9 @@ class NGADCanonicalDataset(Dataset):
         recent_memory = recent_cameras.permute(0, 2, 1, 3, 4).contiguous()
         long_memory = long_cameras.permute(1, 0, 3, 2, 4, 5).contiguous()
 
-        base_pixel_mask = meta["pixel_masks"] & camera_mask[:, None, None]
+        base_pixel_mask = meta["pixel_mask"][None].expand(
+            len(self.camera_keys), -1, -1
+        ) & camera_mask[:, None, None]
         image_pixel_mask = base_pixel_mask[:, None].expand(
             -1, video.shape[2], -1, -1
         ) & ~image_is_pad[None, :, None, None]
@@ -1152,9 +1328,11 @@ class NGADCanonicalDataset(Dataset):
             "action_feature_mask": action_feature_mask,
             "proprio_feature_mask": proprio_feature_mask,
             "action_history_feature_mask": action_history_feature_mask,
-            "arm_mask": arm_mask,
+            "observation_state_element_mask": state_element_mask,
+            "action_element_mask": action_element_mask,
             CANONICAL_TACTILE_VALUES_KEY: tactile_values,
             CANONICAL_TACTILE_DT_KEY: tactile_dt,
+            "tactile_field_mask": tactile_mask,
             "camera_view_mask": camera_mask,
             "image_pixel_mask": image_pixel_mask,
             "recent_memory_pixel_mask": recent_memory_pixel_mask,

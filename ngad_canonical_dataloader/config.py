@@ -20,20 +20,22 @@ CONFIG_SCHEMA_VERSION = "ngad_canonical_dataloader_v1"
 
 @dataclass(frozen=True)
 class DatasetRootConfig:
-    """One named physical dataset root and its external normalization statistics."""
+    """One named root with its canonical masks and normalization statistics."""
 
     name: str
     path: str
+    mask_path: str
     normalization_stats_path: str
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "DatasetRootConfig":
-        expected = {"name", "path", "normalization_stats_path"}
+        expected = {"name", "path", "mask_path", "normalization_stats_path"}
         if set(value) != expected:
             raise ValueError(f"Each dataset root must contain exactly {sorted(expected)}.")
         return cls(
             name=str(value["name"]),
             path=str(value["path"]),
+            mask_path=str(value["mask_path"]),
             normalization_stats_path=str(value["normalization_stats_path"]),
         )
 
@@ -41,6 +43,7 @@ class DatasetRootConfig:
         return {
             "name": self.name,
             "path": self.path,
+            "mask_path": self.mask_path,
             "normalization_stats_path": self.normalization_stats_path,
         }
 
@@ -163,4 +166,3 @@ def build_dataset_from_yaml(path: str | Path) -> NGADCanonicalDataset:
     """Construct the canonical Dataset from one strict YAML file."""
     config = load_dataset_config(path)
     return NGADCanonicalDataset(**config.to_dataset_kwargs())
-
