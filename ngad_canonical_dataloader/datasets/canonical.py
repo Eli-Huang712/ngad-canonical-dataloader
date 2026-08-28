@@ -15,16 +15,20 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
-from ngad_canonical_dataloader import rotation as rotation_utils
-from ngad_canonical_dataloader.tcp import (
+from ngad_canonical_dataloader.action import (
     DUAL_ARM_TCP_FEATURE_DIM,
     WAM_FEATURE_DIM,
     denormalize_dual_arm_relative_tcp,
     dual_arm_tcp_target_relative_to_anchor,
     element_mask_to_feature_mask,
+    matrix_to_quaternion_xyzw,
+    matrix_to_rotation_6d_rows,
     normalize_dual_arm_absolute_tcp,
     normalize_dual_arm_relative_tcp,
     pack_dual_arm_tcp,
+    quaternion_slerp_xyzw,
+    quaternion_xyzw_to_matrix,
+    rotation_6d_rows_to_matrix,
 )
 from ngad_canonical_dataloader.windows import (
     split_episode_indices,
@@ -148,15 +152,15 @@ def interpolate_canonical_tcp(
     weight = fraction.unsqueeze(-1)
     position = torch.lerp(lower[..., :3], upper[..., :3], weight)
     openness = torch.lerp(lower[..., 9:10], upper[..., 9:10], weight)
-    lower_rotation = rotation_utils.rotation_6d_rows_to_matrix(lower[..., 3:9])
-    upper_rotation = rotation_utils.rotation_6d_rows_to_matrix(upper[..., 3:9])
-    quaternion = rotation_utils.quaternion_slerp_xyzw(
-        rotation_utils.matrix_to_quaternion_xyzw(lower_rotation),
-        rotation_utils.matrix_to_quaternion_xyzw(upper_rotation),
+    lower_rotation = rotation_6d_rows_to_matrix(lower[..., 3:9])
+    upper_rotation = rotation_6d_rows_to_matrix(upper[..., 3:9])
+    quaternion = quaternion_slerp_xyzw(
+        matrix_to_quaternion_xyzw(lower_rotation),
+        matrix_to_quaternion_xyzw(upper_rotation),
         fraction,
     )
-    rotation = rotation_utils.matrix_to_rotation_6d_rows(
-        rotation_utils.quaternion_xyzw_to_matrix(quaternion)
+    rotation = matrix_to_rotation_6d_rows(
+        quaternion_xyzw_to_matrix(quaternion)
     )
     return torch.cat([position, rotation, openness], dim=-1)
 

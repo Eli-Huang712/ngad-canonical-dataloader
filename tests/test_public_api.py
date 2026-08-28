@@ -9,7 +9,7 @@ from ngad_canonical_dataloader.datasets.canonical import (
     CANONICAL_TACTILE_DT_KEY,
     CANONICAL_TACTILE_VALUES_KEY,
 )
-from ngad_canonical_dataloader.tcp import element_mask_to_feature_mask, pack_dual_arm_tcp
+from ngad_canonical_dataloader.action import element_mask_to_feature_mask, pack_dual_arm_tcp
 from ngad_canonical_dataloader.windows import wam_window_indices
 
 
