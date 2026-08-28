@@ -33,45 +33,6 @@ def split_episode_indices(
     return set(episode_indices).difference(validation), validation
 
 
-def single_rate_wam_window_indices(
-    start: int,
-    *,
-    episode_length: int,
-    action_horizon: int,
-    action_sample_stride: int,
-    video_sample_stride: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build the original padded window for adapters sharing one source grid."""
-    if (
-        episode_length <= 0
-        or action_horizon <= 0
-        or action_sample_stride <= 0
-        or video_sample_stride <= 0
-    ):
-        raise ValueError(
-            "episode_length, action_horizon, action_sample_stride, and "
-            "video_sample_stride must be positive."
-        )
-    if not 0 <= start < episode_length:
-        raise ValueError(f"start must be in [0,{episode_length}), got {start}.")
-    if action_horizon % video_sample_stride:
-        raise ValueError("action_horizon must be divisible by video_sample_stride.")
-
-    action_raw = start + torch.arange(action_horizon, dtype=torch.long) * action_sample_stride
-    observation_raw = start + torch.arange(
-        0, action_horizon + 1, video_sample_stride, dtype=torch.long
-    ) * action_sample_stride
-    action_is_pad = action_raw >= episode_length
-    image_is_pad = observation_raw >= episode_length
-    last = episode_length - 1
-    return (
-        observation_raw.clamp(max=last),
-        action_raw.clamp(max=last),
-        image_is_pad,
-        action_is_pad,
-    )
-
-
 def wam_window_indices(
     anchor_rgb_index: int,
     *,
@@ -111,4 +72,3 @@ def wam_window_indices(
         image_is_pad,
         action_is_pad,
     )
-
