@@ -10,7 +10,6 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from ngad_canonical_dataloader.backends import create_storage_backends
@@ -168,8 +167,6 @@ class NGADCanonicalDataset(Dataset):
         dataset_dirs: list[dict[str, Any]],
         target_rgb_fps: float,
         target_action_fps: float,
-        camera_keys: list[str] | tuple[str, ...] = CANONICAL_CAMERA_KEYS,
-        num_frames: int = 17,
         action_horizon: int = 32,
         recent_memory_frames: int = 24,
         long_memory_anchor_interval_frames: int = 50,
@@ -182,32 +179,25 @@ class NGADCanonicalDataset(Dataset):
         validation_split: float = 0.0,
         validation_seed: int = 3407,
         split: str = "train",
-        resolution: int = CANONICAL_IMAGE_SIZE,
         transform=None,
         **extra: Any,
     ) -> None:
         del transform
         legacy_fields = {
             "action_sample_stride",
+            "camera_keys",
             "concat_multi_camera",
             "history_chunks",
+            "num_frames",
             "normalization_stats_path",
+            "resolution",
             "target_fps",
             "video_sample_stride",
         }.intersection(extra)
         if legacy_fields:
             raise TypeError(
-                "NGADCanonicalDataset no longer accepts legacy sampling fields: "
+                "NGADCanonicalDataset no longer accepts legacy or fixed-ABI fields: "
                 f"{sorted(legacy_fields)}."
-            )
-        if tuple(camera_keys) != self.expected_camera_keys:
-            raise ValueError(
-                f"{type(self).__name__} camera order is fixed to {self.expected_camera_keys}."
-            )
-        if int(resolution) != CANONICAL_IMAGE_SIZE:
-            raise ValueError(
-                f"{type(self).__name__} requires the fixed {CANONICAL_IMAGE_SIZE}x"
-                f"{CANONICAL_IMAGE_SIZE} image ABI."
             )
         if not dataset_dirs:
             raise ValueError("NGADCanonicalDataset requires at least one named dataset root.")
@@ -227,11 +217,6 @@ class NGADCanonicalDataset(Dataset):
             raise ValueError("NGAD canonical model inputs require action_dim=128 and proprio_dim=128.")
         if int(action_horizon) <= 0 or int(action_horizon) % int(round(rate_ratio)):
             raise ValueError("action_horizon must be positive and divisible by the rate ratio.")
-        expected_frames = int(action_horizon) // int(round(rate_ratio)) + 1
-        if int(num_frames) != expected_frames:
-            raise ValueError(
-                f"num_frames must be {expected_frames} for the configured rates and horizon."
-            )
         memory_sizes = (
             recent_memory_frames,
             long_memory_anchor_interval_frames,
@@ -298,13 +283,12 @@ class NGADCanonicalDataset(Dataset):
         self.target_rgb_fps = float(target_rgb_fps)
         self.target_action_fps = float(target_action_fps)
         self.action_horizon = int(action_horizon)
-        self.num_frames = int(num_frames)
         self.recent_memory_frames = int(recent_memory_frames)
         self.long_memory_anchor_interval_frames = int(long_memory_anchor_interval_frames)
         self.long_memory_window_frames = int(long_memory_window_frames)
         self.long_memory_slots = int(long_memory_slots)
         self.action_history_horizon = int(action_history_horizon)
-        self.resolution = int(resolution)
+        self.resolution = CANONICAL_IMAGE_SIZE
         self.load_vae_feat = False
         self.load_text_feat = False
         self.aspect_ratio = {"1.00": [self.resolution, self.resolution]}
@@ -533,13 +517,7 @@ class NGADCanonicalDataset(Dataset):
                     f"{path} mask {key!r} must be bool "
                     f"[{CANONICAL_IMAGE_SIZE},{CANONICAL_IMAGE_SIZE}]."
                 )
-        pixel_mask = torch.from_numpy(mask.copy()).unsqueeze(0).unsqueeze(0).float()
-        pixel_mask = F.interpolate(
-            pixel_mask,
-            size=(self.resolution, self.resolution),
-            mode="nearest",
-        )
-        return pixel_mask[0, 0].bool()
+        return torch.from_numpy(mask.copy())
 
     @staticmethod
     def _target_episode_length(
@@ -681,14 +659,14 @@ class NGADCanonicalDataset(Dataset):
             )
 
     def _prepare_video(self, video: torch.Tensor) -> torch.Tensor:
-        """Normalize backend-neutral uint8 RGB frames and resize for the sample ABI."""
-        video = video.float() / 127.5 - 1.0
-        return F.interpolate(
-            video,
-            size=(self.resolution, self.resolution),
-            mode="bilinear",
-            align_corners=False,
-        )
+        """Validate backend-neutral uint8 RGB frames and normalize to [-1,1]."""
+        expected = (3, CANONICAL_IMAGE_SIZE, CANONICAL_IMAGE_SIZE)
+        if video.dtype != torch.uint8 or video.ndim != 4 or tuple(video.shape[1:]) != expected:
+            raise ValueError(
+                "Canonical camera backend must return uint8 [T,3,256,256], "
+                f"got dtype={video.dtype}, shape={tuple(video.shape)}."
+            )
+        return video.float() / 127.5 - 1.0
 
     def _blank_video(self, frame_count: int) -> torch.Tensor:
         """Create the canonical black value for a camera disabled by field_mask."""

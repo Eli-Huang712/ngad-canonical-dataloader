@@ -21,6 +21,16 @@ def test_dataset_classes_are_importable() -> None:
     assert NGADCanonicalDataset.__name__ == "NGADCanonicalDataset"
 
 
+def test_fixed_canonical_abi_is_not_configurable() -> None:
+    with pytest.raises(TypeError, match="fixed-ABI"):
+        NGADCanonicalDataset(
+            dataset_dirs=[],
+            target_rgb_fps=10,
+            target_action_fps=20,
+            resolution=224,
+        )
+
+
 def test_storage_backend_factory_selects_only_supported_physical_pairs(tmp_path) -> None:
     lance_root = tmp_path / "lance"
     (lance_root / "_versions").mkdir(parents=True)
@@ -123,7 +133,6 @@ def test_canonical_sidecar_produces_tensor_masks(tmp_path) -> None:
 
     dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
     dataset.camera_keys = CANONICAL_CAMERA_KEYS
-    dataset.resolution = 256
     contract = dataset._load_mask_contract(manifest_path, "libero")
     pixel_mask = dataset._load_pixel_mask(contract)
 
@@ -138,3 +147,15 @@ def test_canonical_sidecar_produces_tensor_masks(tmp_path) -> None:
     )
     assert pixel_mask.shape == (256, 256)
     assert pixel_mask.all()
+
+
+def test_canonical_video_preparation_only_normalizes_fixed_uint8_frames() -> None:
+    dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
+    video = torch.zeros((2, 3, 256, 256), dtype=torch.uint8)
+    prepared = dataset._prepare_video(video)
+    assert prepared.shape == video.shape
+    assert prepared.dtype == torch.float32
+    assert torch.all(prepared == -1.0)
+
+    with pytest.raises(ValueError, match=r"uint8 \[T,3,256,256\]"):
+        dataset._prepare_video(torch.zeros((2, 3, 224, 224), dtype=torch.uint8))

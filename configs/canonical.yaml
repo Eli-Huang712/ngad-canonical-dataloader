@@ -10,15 +10,6 @@ dataset:
   target_rgb_fps: 10
   target_action_fps: 20
 
-  camera_keys:
-    - observation.images.cam_head_left
-    - observation.images.cam_head_right
-    - observation.images.cam_left_wrist_left
-    - observation.images.cam_left_wrist_right
-    - observation.images.cam_right_wrist_left
-    - observation.images.cam_right_wrist_right
-
-  num_frames: 17
   action_horizon: 32
   recent_memory_frames: 24
   long_memory_anchor_interval_frames: 50
@@ -26,7 +17,6 @@ dataset:
   long_memory_slots: 5
   action_history_horizon: 10
 
-  resolution: 256
   split: train
   validation_split: 0.0
   validation_seed: 3407
