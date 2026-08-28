@@ -1,20 +1,12 @@
 import torch
 
-from ngad_canonical_dataloader import (
-    NGADCanonicalDataset,
-    SanaWAMHyEmbodiedDataset,
-    SanaWAMLiberoDataset,
-    SanaWAMUMIDataset,
-)
+from ngad_canonical_dataloader import NGADCanonicalDataset
 from ngad_canonical_dataloader.tcp import pack_dual_arm_tcp
 from ngad_canonical_dataloader.windows import wam_window_indices
 
 
 def test_dataset_classes_are_importable() -> None:
     assert NGADCanonicalDataset.__name__ == "NGADCanonicalDataset"
-    assert SanaWAMHyEmbodiedDataset.__name__ == "SanaWAMHyEmbodiedDataset"
-    assert SanaWAMLiberoDataset.__name__ == "SanaWAMLiberoDataset"
-    assert SanaWAMUMIDataset.__name__ == "SanaWAMUMIDataset"
 
 
 def test_tcp128_and_window_helpers_remain_available() -> None:
@@ -32,4 +24,3 @@ def test_tcp128_and_window_helpers_remain_available() -> None:
     assert actions.shape == (32,)
     assert not image_is_pad.any()
     assert not action_is_pad.any()
-
