@@ -15,3 +15,10 @@ next decoupling pass, not an assertion that the current sample ABI is final or c
 - `python3 -m compileall -q ngad_canonical_dataloader tests`: passed.
 - Runtime import and pytest were not executed locally because the system Python does not provide
   `torch` or `pytest`. Real backend/data correctness is intentionally outside this extraction step.
+
+## Canonical-only follow-up
+
+- Removed the LIBERO, Hy-Embodied and UMI-specific Dataset implementations.
+- Kept one `NGADCanonicalDataset` public reader.
+- Aligned six camera names and tactile fields with the published canonical document.
+- Added a strict versioned YAML configuration and `build_dataset_from_yaml()`.
