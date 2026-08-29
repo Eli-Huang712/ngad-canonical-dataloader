@@ -11,7 +11,41 @@ import yaml
 from ngad_canonical_dataloader.datasets.canonical import NGADCanonicalDataset
 
 
-CONFIG_SCHEMA_VERSION = "ngad_canonical_dataloader_v1"
+CONFIG_SCHEMA_VERSION = "ngad_canonical_dataloader_v2"
+
+
+@dataclass(frozen=True)
+class TimelineConfig:
+    """One anchor-relative RGB grid with an integer action substep axis."""
+
+    rgb_rate_hz: float
+    action_steps_per_rgb_frame: int
+    anchor_offset: int
+    frame_ranges: tuple[tuple[int, int], ...]
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "TimelineConfig":
+        expected = {
+            "rgb_rate_hz",
+            "action_steps_per_rgb_frame",
+            "anchor_offset",
+            "frame_ranges",
+        }
+        if set(value) != expected:
+            raise ValueError(f"timeline must contain exactly {sorted(expected)}.")
+        ranges_value = value["frame_ranges"]
+        if not isinstance(ranges_value, list):
+            raise TypeError("timeline.frame_ranges must be a list of [start, end] pairs.")
+        frame_ranges = tuple(
+            tuple(int(bound) for bound in frame_range)
+            for frame_range in ranges_value
+        )
+        return cls(
+            rgb_rate_hz=float(value["rgb_rate_hz"]),
+            action_steps_per_rgb_frame=int(value["action_steps_per_rgb_frame"]),
+            anchor_offset=int(value["anchor_offset"]),
+            frame_ranges=frame_ranges,
+        )
 
 
 @dataclass(frozen=True)
@@ -49,14 +83,7 @@ class DatasetConfig:
     """All arguments required to construct :class:`NGADCanonicalDataset`."""
 
     dataset_dirs: tuple[DatasetRootConfig, ...]
-    target_rgb_fps: float
-    target_action_fps: float
-    action_horizon: int = 32
-    recent_memory_frames: int = 24
-    long_memory_anchor_interval_frames: int = 50
-    long_memory_window_frames: int = 8
-    long_memory_slots: int = 5
-    action_history_horizon: int = 10
+    timeline: TimelineConfig
     max_samples: int | None = None
     validation_split: float = 0.0
     validation_seed: int = 3407
@@ -66,14 +93,7 @@ class DatasetConfig:
     def from_mapping(cls, value: Mapping[str, Any]) -> "DatasetConfig":
         allowed = {
             "dataset_dirs",
-            "target_rgb_fps",
-            "target_action_fps",
-            "action_horizon",
-            "recent_memory_frames",
-            "long_memory_anchor_interval_frames",
-            "long_memory_window_frames",
-            "long_memory_slots",
-            "action_history_horizon",
+            "timeline",
             "max_samples",
             "validation_split",
             "validation_seed",
@@ -82,7 +102,7 @@ class DatasetConfig:
         unknown = set(value).difference(allowed)
         if unknown:
             raise ValueError(f"Unknown dataset configuration fields: {sorted(unknown)}.")
-        required = {"dataset_dirs", "target_rgb_fps", "target_action_fps"}
+        required = {"dataset_dirs", "timeline"}
         missing = required.difference(value)
         if missing:
             raise ValueError(f"Missing dataset configuration fields: {sorted(missing)}.")
@@ -92,16 +112,7 @@ class DatasetConfig:
         roots = tuple(DatasetRootConfig.from_mapping(root) for root in roots_value)
         return cls(
             dataset_dirs=roots,
-            target_rgb_fps=float(value["target_rgb_fps"]),
-            target_action_fps=float(value["target_action_fps"]),
-            action_horizon=int(value.get("action_horizon", 32)),
-            recent_memory_frames=int(value.get("recent_memory_frames", 24)),
-            long_memory_anchor_interval_frames=int(
-                value.get("long_memory_anchor_interval_frames", 50)
-            ),
-            long_memory_window_frames=int(value.get("long_memory_window_frames", 8)),
-            long_memory_slots=int(value.get("long_memory_slots", 5)),
-            action_history_horizon=int(value.get("action_history_horizon", 10)),
+            timeline=TimelineConfig.from_mapping(value["timeline"]),
             max_samples=(
                 None if value.get("max_samples") is None else int(value["max_samples"])
             ),
@@ -113,14 +124,10 @@ class DatasetConfig:
     def to_dataset_kwargs(self) -> dict[str, Any]:
         return {
             "dataset_dirs": [root.to_dataset_entry() for root in self.dataset_dirs],
-            "target_rgb_fps": self.target_rgb_fps,
-            "target_action_fps": self.target_action_fps,
-            "action_horizon": self.action_horizon,
-            "recent_memory_frames": self.recent_memory_frames,
-            "long_memory_anchor_interval_frames": self.long_memory_anchor_interval_frames,
-            "long_memory_window_frames": self.long_memory_window_frames,
-            "long_memory_slots": self.long_memory_slots,
-            "action_history_horizon": self.action_history_horizon,
+            "rgb_rate_hz": self.timeline.rgb_rate_hz,
+            "action_steps_per_rgb_frame": self.timeline.action_steps_per_rgb_frame,
+            "anchor_offset": self.timeline.anchor_offset,
+            "frame_ranges": self.timeline.frame_ranges,
             "max_samples": self.max_samples,
             "validation_split": self.validation_split,
             "validation_seed": self.validation_seed,

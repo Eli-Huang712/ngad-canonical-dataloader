@@ -9,9 +9,10 @@ from ngad_canonical_dataloader.config import (
 def test_example_yaml_matches_the_strict_config_contract() -> None:
     path = Path(__file__).parents[1] / "configs" / "canonical.yaml"
     config = load_dataset_config(path)
-    assert CONFIG_SCHEMA_VERSION == "ngad_canonical_dataloader_v1"
-    assert config.target_rgb_fps == 10
-    assert config.target_action_fps == 20
+    assert CONFIG_SCHEMA_VERSION == "ngad_canonical_dataloader_v2"
+    assert config.timeline.rgb_rate_hz == 10
+    assert config.timeline.action_steps_per_rgb_frame == 2
+    assert config.timeline.anchor_offset == 0
+    assert config.timeline.frame_ranges[-1] == (-32, 16)
     assert config.dataset_dirs[0].name == "libero"
     assert config.dataset_dirs[0].mask_path == "/path/to/canonical/libero/mask.json"
-    assert config.action_horizon == 32

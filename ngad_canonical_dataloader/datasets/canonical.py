@@ -29,10 +29,11 @@ from ngad_canonical_dataloader.action import (
     rotation_6d_rows_to_matrix,
 )
 from ngad_canonical_dataloader.windows import (
+    TimelineLayout,
+    build_timeline_layout,
     split_episode_indices,
-    wam_window_indices,
+    timeline_sample_indices,
 )
-from ngad_canonical_dataloader.memory import wam_memory_indices
 
 
 NGAD_CANONICAL_SCHEMA = "ngad_canonical_tcp_v1"
@@ -111,7 +112,7 @@ class CanonicalTCPTransform:
         absolute_state_targets: torch.Tensor,
         action_element_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode future states relative to one explicit current-frame anchor."""
+        """Encode time-indexed states relative to one explicit RGB anchor."""
         feature_mask = element_mask_to_feature_mask(action_element_mask)
         anchor = self._flatten_state(anchor_state)
         targets = self._flatten_state(absolute_state_targets)
@@ -165,67 +166,29 @@ class NGADCanonicalDataset(Dataset):
     def __init__(
         self,
         dataset_dirs: list[dict[str, Any]],
-        target_rgb_fps: float,
-        target_action_fps: float,
-        action_horizon: int = 32,
-        recent_memory_frames: int = 24,
-        long_memory_anchor_interval_frames: int = 50,
-        long_memory_window_frames: int = 8,
-        long_memory_slots: int = 5,
-        action_history_horizon: int = 10,
-        action_dim: int = WAM_FEATURE_DIM,
-        proprio_dim: int = WAM_FEATURE_DIM,
+        rgb_rate_hz: float,
+        action_steps_per_rgb_frame: int,
+        anchor_offset: int,
+        frame_ranges: tuple[tuple[int, int], ...],
         max_samples: int | None = None,
         validation_split: float = 0.0,
         validation_seed: int = 3407,
         split: str = "train",
-        transform=None,
-        **extra: Any,
     ) -> None:
-        del transform
-        legacy_fields = {
-            "action_sample_stride",
-            "camera_keys",
-            "concat_multi_camera",
-            "history_chunks",
-            "num_frames",
-            "normalization_stats_path",
-            "resolution",
-            "target_fps",
-            "video_sample_stride",
-        }.intersection(extra)
-        if legacy_fields:
-            raise TypeError(
-                "NGADCanonicalDataset no longer accepts legacy or fixed-ABI fields: "
-                f"{sorted(legacy_fields)}."
-            )
         if not dataset_dirs:
             raise ValueError("NGADCanonicalDataset requires at least one named dataset root.")
         if (
-            target_rgb_fps is None
-            or target_action_fps is None
-            or not np.isfinite(float(target_rgb_fps))
-            or not np.isfinite(float(target_action_fps))
-            or float(target_rgb_fps) <= 0
-            or float(target_action_fps) <= 0
+            rgb_rate_hz is None
+            or not np.isfinite(float(rgb_rate_hz))
+            or float(rgb_rate_hz) <= 0
         ):
-            raise ValueError("NGADCanonicalDataset requires positive RGB and action target rates.")
-        rate_ratio = float(target_action_fps) / float(target_rgb_fps)
-        if abs(rate_ratio - round(rate_ratio)) > 1.0e-9 or rate_ratio < 1.0:
-            raise ValueError("target_action_fps / target_rgb_fps must be a positive integer.")
-        if int(action_dim) != WAM_FEATURE_DIM or int(proprio_dim) != WAM_FEATURE_DIM:
-            raise ValueError("NGAD canonical model inputs require action_dim=128 and proprio_dim=128.")
-        if int(action_horizon) <= 0 or int(action_horizon) % int(round(rate_ratio)):
-            raise ValueError("action_horizon must be positive and divisible by the rate ratio.")
-        memory_sizes = (
-            recent_memory_frames,
-            long_memory_anchor_interval_frames,
-            long_memory_window_frames,
-            long_memory_slots,
-            action_history_horizon,
+            raise ValueError("NGADCanonicalDataset requires a positive RGB rate.")
+        if int(anchor_offset) != 0:
+            raise ValueError("The canonical timeline anchor_offset must be 0.")
+        timeline_layout = build_timeline_layout(
+            frame_ranges,
+            action_steps_per_rgb_frame,
         )
-        if any(int(value) <= 0 for value in memory_sizes):
-            raise ValueError("All canonical memory sizes must be positive.")
         if split not in {"train", "validation"}:
             raise ValueError("split must be 'train' or 'validation'.")
 
@@ -280,18 +243,13 @@ class NGADCanonicalDataset(Dataset):
             )
 
         self.camera_keys = self.expected_camera_keys
-        self.target_rgb_fps = float(target_rgb_fps)
-        self.target_action_fps = float(target_action_fps)
-        self.action_horizon = int(action_horizon)
-        self.recent_memory_frames = int(recent_memory_frames)
-        self.long_memory_anchor_interval_frames = int(long_memory_anchor_interval_frames)
-        self.long_memory_window_frames = int(long_memory_window_frames)
-        self.long_memory_slots = int(long_memory_slots)
-        self.action_history_horizon = int(action_history_horizon)
+        self.rgb_rate_hz = float(rgb_rate_hz)
+        self.action_steps_per_rgb_frame = int(action_steps_per_rgb_frame)
+        self.action_rate_hz = (
+            self.rgb_rate_hz * self.action_steps_per_rgb_frame
+        )
+        self.timeline_layout: TimelineLayout = timeline_layout
         self.resolution = CANONICAL_IMAGE_SIZE
-        self.load_vae_feat = False
-        self.load_text_feat = False
-        self.aspect_ratio = {"1.00": [self.resolution, self.resolution]}
 
         self._root_meta: list[dict[str, Any]] = []
         self._episodes: list[dict[str, Any]] = []
@@ -319,16 +277,16 @@ class NGADCanonicalDataset(Dataset):
             source_fps = float(info.get("fps", 0.0))
             if not np.isfinite(source_fps) or source_fps <= 0:
                 raise ValueError(f"{root} must declare a positive source fps.")
-            if source_fps < self.target_rgb_fps:
+            if source_fps < self.rgb_rate_hz:
                 raise ValueError(
-                    f"{root} source fps {source_fps} is below target_rgb_fps "
-                    f"{self.target_rgb_fps}; RGB sampling never synthesizes frames."
+                    f"{root} source fps {source_fps} is below rgb_rate_hz "
+                    f"{self.rgb_rate_hz}; RGB sampling never synthesizes frames."
                 )
-            source_rgb_ratio = source_fps / self.target_rgb_fps
+            source_rgb_ratio = source_fps / self.rgb_rate_hz
             if abs(source_rgb_ratio - round(source_rgb_ratio)) > 1.0e-9:
                 raise ValueError(
                     f"{root} source fps {source_fps} is not an integer multiple of "
-                    f"target_rgb_fps {self.target_rgb_fps}; RGB anchors must be real frames."
+                    f"rgb_rate_hz {self.rgb_rate_hz}; RGB anchors must be real frames."
                 )
             tasks, episodes = table_backend.read_catalog(
                 self.camera_keys, mask_contract["camera_mask"]
@@ -359,10 +317,10 @@ class NGADCanonicalDataset(Dataset):
                 if episode["episode_index"] not in selected:
                     continue
                 rgb_target_length = self._target_episode_length(
-                    episode["length"], source_fps, self.target_rgb_fps
+                    episode["length"], source_fps, self.rgb_rate_hz
                 )
                 action_target_length = self._target_episode_length(
-                    episode["length"], source_fps, self.target_action_fps
+                    episode["length"], source_fps, self.action_rate_hz
                 )
                 self._episodes.append(
                     {
@@ -377,11 +335,9 @@ class NGADCanonicalDataset(Dataset):
 
         if not self._episodes:
             raise ValueError(f"NGAD canonical split '{split}' has no episodes.")
-        self.ori_imgs_nums = total_windows
         if max_samples is not None and int(max_samples) <= 0:
             raise ValueError("max_samples must be positive when provided.")
         self._length = min(total_windows, int(max_samples)) if max_samples is not None else total_windows
-        self.ratio_nums = {next(iter(self.aspect_ratio)): self._length}
 
         self._normalization_stats = {
             "schema_version": "ngad_canonical_normalization_map_v1",
@@ -677,55 +633,40 @@ class NGADCanonicalDataset(Dataset):
         )
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        episode, start = self._locate_window(index)
-        target_observation_indices, target_action_indices, image_is_pad, action_is_pad = wam_window_indices(
-            start,
+        episode, anchor_rgb_index = self._locate_window(index)
+        timeline = timeline_sample_indices(
+            anchor_rgb_index,
             rgb_episode_length=episode["rgb_target_length"],
             action_episode_length=episode["action_target_length"],
-            action_horizon=self.action_horizon,
-            target_rgb_fps=self.target_rgb_fps,
-            target_action_fps=self.target_action_fps,
-        )
-        memory = wam_memory_indices(
-            start,
-            rgb_episode_length=episode["rgb_target_length"],
-            action_episode_length=episode["action_target_length"],
-            target_rgb_fps=self.target_rgb_fps,
-            target_action_fps=self.target_action_fps,
-            recent_memory_frames=self.recent_memory_frames,
-            long_memory_anchor_interval_frames=self.long_memory_anchor_interval_frames,
-            long_memory_window_frames=self.long_memory_window_frames,
-            long_memory_slots=self.long_memory_slots,
-            action_history_horizon=self.action_history_horizon,
+            layout=self.timeline_layout,
         )
         meta = self._root_meta[episode["root_index"]]
         source_fps = meta["source_fps"]
-        all_rgb_target_indices = torch.cat(
-            [
-                target_observation_indices,
-                memory.recent_rgb,
-                memory.long_rgb.reshape(-1),
-            ]
+        source_frame_indices = self._source_indices(
+            timeline.frame_indices,
+            source_fps,
+            self.rgb_rate_hz,
         )
-        all_observation_indices = self._source_indices(
-            all_rgb_target_indices, source_fps, self.target_rgb_fps
+        anchor_source_index = self._source_indices(
+            torch.tensor([anchor_rgb_index], dtype=torch.long),
+            source_fps,
+            self.rgb_rate_hz,
         )
-        observation_count = target_observation_indices.numel()
-        recent_count = memory.recent_rgb.numel()
-        observation_indices = all_observation_indices[:observation_count]
-        action_steps_per_rgb = int(round(self.target_action_fps / self.target_rgb_fps))
-        anchor_action_index = torch.tensor([start * action_steps_per_rgb], dtype=torch.long)
+        anchor_action_index = torch.tensor(
+            [anchor_rgb_index * self.action_steps_per_rgb_frame],
+            dtype=torch.long,
+        )
         state_target_indices = torch.cat(
-            [anchor_action_index, target_action_indices, memory.action_history]
+            [anchor_action_index, timeline.action_indices.reshape(-1)]
         )
         state_lower, state_upper, state_fraction = self._state_interpolation_indices(
             state_target_indices,
             source_fps,
-            self.target_action_fps,
+            self.action_rate_hz,
             episode["length"],
         )
         requested = torch.unique(
-            torch.cat([all_observation_indices, state_lower, state_upper]), sorted=True
+            torch.cat([source_frame_indices, state_lower, state_upper]), sorted=True
         )
         rows = meta["table_backend"].read_rows(
             episode,
@@ -752,7 +693,7 @@ class NGADCanonicalDataset(Dataset):
             [rows[int(frame)][CANONICAL_STATE_KEY] for frame in state_upper.tolist()],
             dtype=torch.float32,
         ))
-        current_row = rows[int(observation_indices[0])]
+        current_row = rows[int(anchor_source_index.item())]
         tactile_values = (
             torch.as_tensor(current_row[CANONICAL_TACTILE_VALUES_KEY], dtype=torch.float32)
             if meta["tactile_mask"][0]
@@ -770,12 +711,12 @@ class NGADCanonicalDataset(Dataset):
                         rows,
                         episode,
                         camera,
-                        all_observation_indices,
+                        source_frame_indices,
                         source_fps,
                     )
                 )
                 if available
-                else self._blank_video(all_observation_indices.numel())
+                else self._blank_video(source_frame_indices.numel())
             )
             for camera, available in zip(self.camera_keys, meta["camera_mask"].tolist())
         ]
@@ -791,99 +732,77 @@ class NGADCanonicalDataset(Dataset):
         tcp_transform = meta["tcp_transform"]
         action, action_feature_mask = tcp_transform.encode_action_targets(
             absolute_state_grid[0],
-            absolute_state_grid[1 : 1 + self.action_horizon],
+            absolute_state_grid[1:],
             action_element_mask,
         )
-        proprio, proprio_feature_mask = tcp_transform.encode_proprio(
+        action = action.reshape(
+            self.timeline_layout.frame_offsets.numel(),
+            self.action_steps_per_rgb_frame,
+            WAM_FEATURE_DIM,
+        )
+        action = action * timeline.action_valid[..., None].to(
+            action.dtype
+        )
+        anchor_state, anchor_state_feature_mask = tcp_transform.encode_proprio(
             absolute_state_grid[0], state_element_mask
-        )
-        action_history, action_history_feature_mask = tcp_transform.encode_action_targets(
-            absolute_state_grid[0],
-            absolute_state_grid[1 + self.action_horizon :],
-            state_element_mask,
-        )
-        action_history = action_history * memory.action_history_valid[:, None].to(
-            action_history.dtype
         )
 
         camera_tensor = torch.stack(all_cameras, dim=0)
-        main_cameras = camera_tensor[:, :observation_count]
-        recent_cameras = camera_tensor[
-            :, observation_count : observation_count + recent_count
-        ]
-        long_cameras = camera_tensor[:, observation_count + recent_count :].reshape(
-            len(self.camera_keys),
-            self.long_memory_slots,
-            self.long_memory_window_frames,
-            3,
-            self.resolution,
-            self.resolution,
+        camera_tensor = torch.where(
+            timeline.frame_valid[None, :, None, None, None],
+            camera_tensor,
+            torch.full_like(camera_tensor, -1.0),
         )
-        main_cameras = torch.where(
-            image_is_pad[None, :, None, None, None],
-            torch.full_like(main_cameras, -1.0),
-            main_cameras,
-        )
-        recent_cameras = torch.where(
-            memory.recent_valid[None, :, None, None, None],
-            recent_cameras,
-            torch.full_like(recent_cameras, -1.0),
-        )
-        long_cameras = torch.where(
-            memory.long_valid[None, :, :, None, None, None],
-            long_cameras,
-            torch.full_like(long_cameras, -1.0),
-        )
-        # Keep the canonical camera axis explicit for shared-VAE tokenization.
-        video = main_cameras.permute(0, 2, 1, 3, 4).contiguous()
-        recent_memory = recent_cameras.permute(0, 2, 1, 3, 4).contiguous()
-        long_memory = long_cameras.permute(1, 0, 3, 2, 4, 5).contiguous()
+        # Time is the leading sample axis; six canonical cameras remain explicit.
+        video = camera_tensor.permute(1, 0, 2, 3, 4).contiguous()
 
         base_pixel_mask = meta["pixel_mask"][None].expand(
             len(self.camera_keys), -1, -1
         ) & camera_mask[:, None, None]
-        image_pixel_mask = base_pixel_mask[:, None].expand(
-            -1, video.shape[2], -1, -1
-        ) & ~image_is_pad[None, :, None, None]
-        recent_memory_pixel_mask = base_pixel_mask[:, None].expand(
-            -1, self.recent_memory_frames, -1, -1
-        ) & memory.recent_valid[None, :, None, None]
-        long_memory_pixel_mask = base_pixel_mask[None, :, None].expand(
-            self.long_memory_slots,
-            -1,
-            self.long_memory_window_frames,
-            -1,
-            -1,
-        ) & memory.long_valid[:, None, :, None, None]
+        image_pixel_mask = base_pixel_mask[None].expand(
+            video.shape[0], -1, -1, -1
+        ) & timeline.frame_valid[:, None, None, None]
+        sample_camera_mask = camera_mask[None].expand(
+            video.shape[0], -1
+        ) & timeline.frame_valid[:, None]
         task = meta["tasks"][task_index]
         episode_timestamp_start = torch.as_tensor(
             rows[0]["timestamp"], dtype=torch.float64
         ).reshape(())
+        anchor_timestamp = (
+            episode_timestamp_start + anchor_rgb_index / self.rgb_rate_hz
+        )
+        frame_timestamps = (
+            anchor_timestamp
+            + self.timeline_layout.frame_offsets.to(torch.float64)
+            / self.rgb_rate_hz
+        )
+        action_timestamps = (
+            anchor_timestamp
+            + self.timeline_layout.action_step_offsets.to(torch.float64)
+            / self.action_rate_hz
+        )
         return {
             "video": video,
+            "frame_offsets": self.timeline_layout.frame_offsets,
+            "source_frame_indices": source_frame_indices,
+            "frame_timestamps": frame_timestamps,
+            "frame_valid": timeline.frame_valid,
             "action": action,
-            "proprio": proprio,
-            "recent_memory": recent_memory,
-            "long_memory": long_memory,
-            "action_history": action_history,
+            "action_step_offsets": self.timeline_layout.action_step_offsets,
+            "action_timestamps": action_timestamps,
+            "action_valid": timeline.action_valid,
+            "anchor_state": anchor_state,
             "action_feature_mask": action_feature_mask,
-            "proprio_feature_mask": proprio_feature_mask,
-            "action_history_feature_mask": action_history_feature_mask,
+            "anchor_state_feature_mask": anchor_state_feature_mask,
             "observation_state_element_mask": state_element_mask,
             "action_element_mask": action_element_mask,
             CANONICAL_TACTILE_VALUES_KEY: tactile_values,
             CANONICAL_TACTILE_DT_KEY: tactile_dt,
             "tactile_field_mask": tactile_mask,
-            "camera_view_mask": camera_mask,
+            "camera_mask": sample_camera_mask,
             "image_pixel_mask": image_pixel_mask,
-            "recent_memory_pixel_mask": recent_memory_pixel_mask,
-            "long_memory_pixel_mask": long_memory_pixel_mask,
             "prompt": DEFAULT_PROMPT.format(task=task),
-            "image_is_pad": image_is_pad,
-            "action_is_pad": action_is_pad,
-            "recent_memory_valid": memory.recent_valid,
-            "long_memory_valid": memory.long_valid,
-            "action_history_valid": memory.action_history_valid,
             "data_info": {
                 "img_hw": torch.tensor([video.shape[-2], video.shape[-1]], dtype=torch.float32),
                 "aspect_ratio": torch.tensor(video.shape[-1] / video.shape[-2], dtype=torch.float32),
@@ -892,20 +811,10 @@ class NGADCanonicalDataset(Dataset):
                 "task_index": task_index,
                 "normalization_id": meta["normalization_id"],
                 "source_fps": source_fps,
-                "target_rgb_fps": self.target_rgb_fps,
-                "target_action_fps": self.target_action_fps,
-                "anchor_timestamp": episode_timestamp_start
-                + start / self.target_rgb_fps,
-                "observation_timestamps": episode_timestamp_start
-                + target_observation_indices.to(torch.float64) / self.target_rgb_fps,
-                "action_timestamps": episode_timestamp_start
-                + target_action_indices.to(torch.float64) / self.target_action_fps,
-                "recent_memory_timestamps": episode_timestamp_start
-                + memory.recent_rgb.to(torch.float64) / self.target_rgb_fps,
-                "long_memory_timestamps": episode_timestamp_start
-                + memory.long_rgb.to(torch.float64) / self.target_rgb_fps,
-                "action_history_timestamps": episode_timestamp_start
-                + memory.action_history.to(torch.float64) / self.target_action_fps,
-                "start": start,
+                "rgb_rate_hz": self.rgb_rate_hz,
+                "action_steps_per_rgb_frame": self.action_steps_per_rgb_frame,
+                "action_rate_hz": self.action_rate_hz,
+                "anchor_timestamp": anchor_timestamp,
+                "anchor_rgb_index": anchor_rgb_index,
             },
         }

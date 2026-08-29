@@ -30,5 +30,32 @@ next decoupling pass, not an assertion that the current sample ABI is final or c
   previous `rotation.py` and `tcp.py` import paths no longer exist.
 - Fields declared unavailable may be physically absent; the Dataset emits deterministic black/zero
   tensors and explicit tensor masks without a backend fallback.
-- Real Lance/LeRobot root tests remain intentionally deferred; local syntax compilation is the only
-  validation performed for this follow-up because the system Python has no `torch` installation.
+- Moved physical storage access into internal table/image backends. Lance and Parquet readers now
+  normalize rows to canonical keys, JPEG and H.264 readers return uint8 RGB tensors, and
+  `NGADCanonicalDataset.__getitem__()` no longer branches on a physical backend.
+- Removed source-adapter-only axis-angle, single-arm packing, chunk-wrapper and single-rate window
+  helpers. Deployment inverse transforms and Dataset normalization export methods remain intact.
+- Removed unused root/episode metadata. Camera order and 256x256 resolution are fixed ABI constants,
+  and decoded images are validated rather than silently resized.
+
+## Unified timeline follow-up (2026-08-29)
+
+- Replaced the separate current/future, recent, long and action-history index paths with one list of
+  anchor-relative inclusive `frame_ranges`.
+- Removed independent `target_action_fps` and action horizons. The action grid is now derived from
+  `rgb_rate_hz * action_steps_per_rgb_frame`.
+- Added a fixed `TimelineLayout` containing semantic frame offsets, per-frame action-step offsets and
+  the lightweight `offset_to_position` lookup used by downstream callers.
+- Changed the sample ABI to time-major `video[N,6,3,256,256]` and frame-aligned
+  `action[N,K,128]`, with explicit offset, timestamp, source-index and validity tensors.
+- Deleted the old `memory.py` production path and all legacy output fields; there is no old-ABI
+  compatibility or fallback.
+- Local `compileall`, config/timeline assertions and a synthetic backend `Dataset.__getitem__()` ABI
+  test passed with the local conda Python.
+- H200-1 CPU test: branch/worktree state was transferred without GPU use to
+  `/data/home/jhhuang/projects/ngad-canonical-dataloader-test-260829-1443`; archive SHA256 was
+  `fa2505f571fc499b90e977479ef6b596d7717ed93d7fd171dec350134a5e8cf2`. Command:
+  `CUDA_VISIBLE_DEVICES="" PYTHONPATH=. /data/cache/conda/envs/maxliu/sana/bin/python -m pytest -q`.
+  Result after the final unified `action[N,K,128]` rename: `11 passed in 1.49s`.
+- Real Lance/LeRobot root tests remain a separate runtime gate; the completed H200 run used the
+  synthetic backend test and did not read production datasets.

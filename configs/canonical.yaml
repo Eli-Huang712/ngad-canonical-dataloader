@@ -1,4 +1,4 @@
-schema_version: ngad_canonical_dataloader_v1
+schema_version: ngad_canonical_dataloader_v2
 
 dataset:
   dataset_dirs:
@@ -7,15 +7,16 @@ dataset:
       mask_path: /path/to/canonical/libero/mask.json
       normalization_stats_path: /path/to/stats/libero.json
 
-  target_rgb_fps: 10
-  target_action_fps: 20
-
-  action_horizon: 32
-  recent_memory_frames: 24
-  long_memory_anchor_interval_frames: 50
-  long_memory_window_frames: 8
-  long_memory_slots: 5
-  action_history_horizon: 10
+  timeline:
+    rgb_rate_hz: 10
+    action_steps_per_rgb_frame: 2
+    anchor_offset: 0
+    frame_ranges:
+      - [-232, -225]
+      - [-182, -175]
+      - [-132, -125]
+      - [-82, -75]
+      - [-32, 16]
 
   split: train
   validation_split: 0.0
