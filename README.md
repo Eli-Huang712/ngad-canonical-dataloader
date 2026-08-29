@@ -1,8 +1,9 @@
 # ngad-canonical-dataloader
 
 `ngad-canonical-dataloader` 是独立的 canonical Loading / Sample Construction 模块。
-它从 canonical 数据集读取样本，以某个真实 RGB frame 为 anchor，构造统一的 RGB/Action
-时间轴、anchor-relative TCP128、normalization、validity mask 和 metadata。
+它从 canonical 数据集读取样本，以某个真实 RGB frame 为 anchor，构造统一的
+RGB/State/Action 时间轴、absolute State TCP128、anchor-relative Action TCP128、
+normalization、validity mask 和 metadata。
 
 本仓库的边界到 `Dataset.__getitem__()` 为止：不包含 PyTorch `DataLoader`、GPU transfer、
 Tokenizer、VAE、flow target/noise construction 或模型代码。后续模块只消费本仓库定义的
@@ -177,7 +178,7 @@ action_time = frame_time - (K - 1 - k) / (rgb_rate_hz * K)
 之间。对于稀疏的 `frame_ranges`，Dataset 只返回每个选中 RGB frame 对应的局部 K 个
 Action，不填充 range 之间未请求的时间空洞，也不把 Action 展平成 `[N*K,128]`。
 
-### 2.3 State 插值、relative action 与 TCP128
+### 2.3 State 插值、relative Action 与 TCP128
 
 落盘 `action` 不作为监督。Dataset 在每个 Action timestamp 上重采样 absolute
 `observation.state`：
@@ -186,8 +187,13 @@ Action，不填充 range 之间未请求的时间空洞，也不把 Action 展�
 - Rot6D：先恢复 SO(3)，再做 shortest-path quaternion SLERP；
 - gripper openness：一阶线性插值。
 
-必须先插值 absolute TCP，再以当前 sample 的 offset `0` state 为固定 anchor 计算所有
-Action：
+State 和 Action 复用同一份 absolute TCP 插值结果，避免各自重采样造成时间或数值偏差：
+
+- State：直接对插值后的 absolute TCP 做 absolute normalization；
+- Action：以当前 sample 的 offset `0` state 为固定 anchor，对插值后的 absolute TCP
+  计算 relative pose，再做 relative normalization。
+
+计算 Action 的公式为：
 
 ```python
 relative_xyz = R_anchor.T @ (xyz_t - xyz_anchor)
@@ -195,10 +201,28 @@ relative_rotation = R_anchor.T @ R_t
 gripper = absolute_openness_t
 ```
 
-随后按 sample 所属数据集的外部 stats 做 normalization：absolute state XYZ 使用 min/max，
-relative action XYZ 使用以零为中心的 per-axis scale，Rot6D 不归一化，openness 保持
-`[0,1]`。双臂 TCP20 写入 TCP128 的 `0:20`，`20:128` 保留为零；element mask 同步映射到
-128D feature mask。
+必须采用“先插值 absolute TCP，再计算 relative pose”的顺序。这样 XYZ、openness 只在
+各自的线性空间插值，rotation 只在 SO(3) 上做一次 SLERP；不会在已经经过 Rot6D 投影、
+relative pose 或 normalization 的表示上再次插值。
+
+随后按 sample 所属数据集的外部 stats 做 normalization：absolute State XYZ 使用 min/max，
+relative Action XYZ 使用以零为中心的 per-axis scale，Rot6D 不归一化，openness 保持
+`[0,1]`。
+
+State 与 Action 使用完全相同的 TCP20→TCP128 槽位规划：
+
+| TCP128 index（Python slice） | 内容 | State 语义 | Action 语义 |
+|---|---|---|---|
+| `0:3` | 左臂 XYZ | absolute | anchor-relative |
+| `3:9` | 左臂 Rot6D | absolute | anchor-relative |
+| `9:10` | 左夹爪 openness | absolute | absolute |
+| `10:13` | 右臂 XYZ | absolute | anchor-relative |
+| `13:19` | 右臂 Rot6D | absolute | anchor-relative |
+| `19:20` | 右夹爪 openness | absolute | absolute |
+| `20:128` | 保留槽位 | 零且 masked | 零且 masked |
+
+对应的 canonical `element_mask[20]` 原样写入 feature mask 的 `0:20`，`20:128` 始终为
+false。State 与 Action 的 tensor shape、时间戳和 validity 完全对齐，都是 `[N,K,*]`。
 
 所有查询都限制在当前 Episode 内。越过 Episode 边界的 RGB/Action 位置保留固定 tensor
 槽位，但对应 `frame_valid`、`action_valid`、camera/pixel mask 为 false，不读取相邻
@@ -223,13 +247,13 @@ Episode，也不按 `task_index` 切分 Episode。sample 的 prompt 暂时使用
     "frame_timestamps":              float64[N],
     "frame_valid":                   bool[N],
 
+    "state":                         float32[N, K, 128],
     "action":                        float32[N, K, 128],
     "action_step_offsets":           int64[N, K],
     "action_timestamps":             float64[N, K],
     "action_valid":                  bool[N, K],
 
-    "anchor_state":                  float32[128],
-    "anchor_state_feature_mask":     bool[128],
+    "state_feature_mask":            bool[128],
     "action_feature_mask":           bool[128],
     "observation_state_element_mask": bool[20],
     "action_element_mask":           bool[20],
@@ -245,9 +269,10 @@ Episode，也不按 `task_index` 切分 Episode。sample 的 prompt 暂时使用
 }
 ```
 
-`video` 已从 `uint8[0,255]` 转为 `float32[-1,1]`。`action_step_offsets[N,K]` 和
-`action_timestamps[N,K]` 是 Action 子步的时间 metadata；它们不会改变 `action[N,K,128]`
-的结构。
+`video` 已从 `uint8[0,255]` 转为 `float32[-1,1]`。`state[N,K,128]` 与
+`action[N,K,128]` 共用 `action_step_offsets[N,K]`、`action_timestamps[N,K]` 和
+`action_valid[N,K]`，不重复输出另一套 State 时间 metadata。Episode 边界外的 State 和
+Action 都填零，并以同一个 `action_valid=False` 排除。
 
 `data_info` 的字段合同为：
 
@@ -306,7 +331,7 @@ dataset:
 ```
 
 上述 `frame_ranges` 展开为 81 个具有真实时间意义的 RGB offset；对应输出
-`video[81,6,3,256,256]` 和 `action[81,2,128]`。
+`video[81,6,3,256,256]`、`state[81,2,128]` 和 `action[81,2,128]`。
 
 ### 4.2 构造 Dataset
 
@@ -331,9 +356,11 @@ frame = sample["video"][position]                       # [6,3,256,256]
 frame_timestamp = sample["frame_timestamps"][position] # scalar float64
 source_index = sample["source_frame_indices"][position]
 
-action = sample["action"][position]                    # [K,128]
+state = sample["state"][position]                      # [K,128], absolute TCP
+action = sample["action"][position]                    # [K,128], relative TCP
 action_timestamp = sample["action_timestamps"][position]  # [K]
 action_valid = sample["action_valid"][position]        # [K]
+valid_state = state[action_valid]
 valid_action = action[action_valid]
 ```
 
@@ -348,4 +375,5 @@ future = sample["frame_offsets"] > 0
 ```
 
 如果特定模型需要 `[N*K,128]`，reshape 应由模型适配层完成；Loading ABI 始终保留
-`action[N,K,128]`，不创建 `action_history`、`recent_memory` 或 `long_memory` 等模型专用字段。
+`state[N,K,128]` 和 `action[N,K,128]`，不创建 `action_history`、`recent_memory` 或
+`long_memory` 等模型专用字段。

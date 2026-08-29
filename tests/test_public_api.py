@@ -336,6 +336,7 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
     sample = dataset[2]
 
     assert sample["video"].shape == (3, 6, 3, 256, 256)
+    assert sample["state"].shape == (3, 2, 128)
     assert sample["action"].shape == (3, 2, 128)
     assert sample["frame_offsets"].tolist() == [-1, 0, 1]
     assert sample["source_frame_indices"].tolist() == [1, 2, 3]
@@ -344,5 +345,15 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
     assert sample["action_valid"].all()
     assert sample["camera_mask"].shape == (3, 6)
     assert sample["image_pixel_mask"].shape == (3, 6, 256, 256)
-    assert sample["anchor_state"].shape == (128,)
+    assert sample["state_feature_mask"].shape == (128,)
+    assert "anchor_state" not in sample
+    assert "anchor_state_feature_mask" not in sample
+    torch.testing.assert_close(
+        sample["state"][..., 0],
+        torch.tensor([[0.05, 0.10], [0.15, 0.20], [0.25, 0.30]]),
+    )
+    torch.testing.assert_close(
+        sample["action"][..., 0],
+        torch.tensor([[-0.15, -0.10], [-0.05, 0.0], [0.05, 0.10]]),
+    )
     assert sample["data_info"]["action_rate_hz"] == 20

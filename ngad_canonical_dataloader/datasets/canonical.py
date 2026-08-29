@@ -91,20 +91,20 @@ class CanonicalTCPTransform:
             )
         return absolute_state.reshape(*absolute_state.shape[:-2], DUAL_ARM_TCP_FEATURE_DIM)
 
-    def encode_proprio(
+    def encode_state_targets(
         self,
-        absolute_state: torch.Tensor,
+        absolute_state_targets: torch.Tensor,
         state_element_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Normalize one absolute state and return its value and validity in TCP128."""
+        """Normalize time-indexed absolute states and encode them in TCP128."""
         feature_mask = element_mask_to_feature_mask(state_element_mask)
         normalized = normalize_dual_arm_absolute_tcp(
-            self._flatten_state(absolute_state),
+            self._flatten_state(absolute_state_targets),
             self.state_xyz_min,
             self.state_xyz_max,
         )
-        proprio = pack_dual_arm_tcp(normalized)
-        return proprio * feature_mask.to(proprio.dtype), feature_mask
+        state = pack_dual_arm_tcp(normalized)
+        return state * feature_mask.to(state.dtype), feature_mask
 
     def encode_action_targets(
         self,
@@ -730,6 +730,8 @@ class NGADCanonicalDataset(Dataset):
         camera_mask = meta["camera_mask"].clone()
         tactile_mask = meta["tactile_mask"].clone()
         tcp_transform = meta["tcp_transform"]
+        # Both outputs reuse this absolute interpolation grid; only Action is
+        # converted into the fixed-anchor frame before normalization.
         action, action_feature_mask = tcp_transform.encode_action_targets(
             absolute_state_grid[0],
             absolute_state_grid[1:],
@@ -743,8 +745,16 @@ class NGADCanonicalDataset(Dataset):
         action = action * timeline.action_valid[..., None].to(
             action.dtype
         )
-        anchor_state, anchor_state_feature_mask = tcp_transform.encode_proprio(
-            absolute_state_grid[0], state_element_mask
+        state, state_feature_mask = tcp_transform.encode_state_targets(
+            absolute_state_grid[1:], state_element_mask
+        )
+        state = state.reshape(
+            self.timeline_layout.frame_offsets.numel(),
+            self.action_steps_per_rgb_frame,
+            WAM_FEATURE_DIM,
+        )
+        state = state * timeline.action_valid[..., None].to(
+            state.dtype
         )
 
         camera_tensor = torch.stack(all_cameras, dim=0)
@@ -788,13 +798,13 @@ class NGADCanonicalDataset(Dataset):
             "source_frame_indices": source_frame_indices,
             "frame_timestamps": frame_timestamps,
             "frame_valid": timeline.frame_valid,
+            "state": state,
             "action": action,
             "action_step_offsets": self.timeline_layout.action_step_offsets,
             "action_timestamps": action_timestamps,
             "action_valid": timeline.action_valid,
-            "anchor_state": anchor_state,
+            "state_feature_mask": state_feature_mask,
             "action_feature_mask": action_feature_mask,
-            "anchor_state_feature_mask": anchor_state_feature_mask,
             "observation_state_element_mask": state_element_mask,
             "action_element_mask": action_element_mask,
             CANONICAL_TACTILE_VALUES_KEY: tactile_values,

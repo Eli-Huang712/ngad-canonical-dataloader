@@ -59,3 +59,15 @@ next decoupling pass, not an assertion that the current sample ABI is final or c
   Result after the final unified `action[N,K,128]` rename: `11 passed in 1.49s`.
 - Real Lance/LeRobot root tests remain a separate runtime gate; the completed H200 run used the
   synthetic backend test and did not read production datasets.
+
+## Frame-aligned State ABI follow-up (2026-08-29)
+
+- Branch: `main`; baseline commit: `9bba4c2`.
+- Reused the single absolute TCP interpolation result to construct both output branches: normalized
+  absolute State and fixed-anchor relative Action. Relative pose is calculated after interpolation.
+- Replaced the single `anchor_state[128]` output with `state[N,K,128]`; State and Action now share
+  `action_step_offsets[N,K]`, `action_timestamps[N,K]` and `action_valid[N,K]`.
+- Both outputs use the same TCP128 layout: left TCP10 in `0:10`, right TCP10 in `10:20`, and reserved
+  zero/masked dimensions in `20:128`.
+- Validation scope: local synthetic Dataset ABI/numerical assertions, Python compile/import checks;
+  real Lance/LeRobot root loading remains a separate runtime gate.
