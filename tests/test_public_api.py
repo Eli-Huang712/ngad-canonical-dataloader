@@ -153,6 +153,10 @@ def test_canonical_sidecar_produces_tensor_masks(tmp_path) -> None:
     )
     manifest = {
         "dataset": "libero",
+        "field_mapping": {
+            CANONICAL_CAMERA_KEYS[0]: "observation.images.cam_head",
+            CANONICAL_CAMERA_KEYS[2]: "observation.images.cam_left_wrist",
+        },
         "image_pixel_mask": {
             "path": "image_pixel_mask_libero.npz",
             "key": "mask",
@@ -165,12 +169,12 @@ def test_canonical_sidecar_produces_tensor_masks(tmp_path) -> None:
             "action": [True] * 10 + [False] * 10,
         },
     }
-    manifest_path = tmp_path / "mask.json"
+    manifest_path = tmp_path / "mask_and_mapping.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
     dataset.camera_keys = CANONICAL_CAMERA_KEYS
-    contract = dataset._load_mask_contract(manifest_path, "libero")
+    contract = dataset._load_mask_and_mapping_contract(manifest_path, "libero")
     pixel_mask = dataset._load_pixel_mask(contract)
 
     assert torch.equal(
@@ -182,8 +186,76 @@ def test_canonical_sidecar_produces_tensor_masks(tmp_path) -> None:
         contract["state_element_mask"],
         torch.tensor([True] * 10 + [False] * 10),
     )
+    assert contract["field_mapping"] == manifest["field_mapping"]
     assert pixel_mask.shape == (256, 256)
     assert pixel_mask.all()
+
+    features = {
+        "observation.images.cam_head": {
+            "dtype": "video",
+            "shape": [256, 256, 3],
+        },
+        "observation.images.cam_left_wrist": {
+            "dtype": "video",
+            "shape": [256, 256, 3],
+        },
+        "observation.state": {"shape": [20]},
+        "action": {"shape": [20]},
+        "timestamp": {"shape": [1]},
+        "frame_index": {"shape": [1]},
+        "episode_index": {"shape": [1]},
+        "index": {"shape": [1]},
+        "task_index": {"shape": [1]},
+    }
+    dataset._validate_features(tmp_path, features, contract)
+    features.pop("observation.images.cam_head")
+    with pytest.raises(ValueError, match="missing physical field"):
+        dataset._validate_features(tmp_path, features, contract)
+
+
+def test_field_mapping_rejects_disabled_canonical_fields(tmp_path) -> None:
+    np.savez(tmp_path / "pixel_mask.npz", mask=np.ones((256, 256), dtype=np.bool_))
+    field_mask = {camera: camera == CANONICAL_CAMERA_KEYS[0] for camera in CANONICAL_CAMERA_KEYS}
+    field_mask.update(
+        {
+            "observation.state": True,
+            "action": True,
+            CANONICAL_TACTILE_VALUES_KEY: False,
+            CANONICAL_TACTILE_DT_KEY: False,
+            "timestamp": True,
+            "frame_index": True,
+            "episode_index": True,
+            "index": True,
+            "task_index": True,
+        }
+    )
+    path = tmp_path / "mask_and_mapping.json"
+    path.write_text(
+        json.dumps(
+            {
+                "dataset": "invalid",
+                "field_mapping": {
+                    CANONICAL_CAMERA_KEYS[1]: "observation.images.cam_head"
+                },
+                "field_mask": field_mask,
+                "element_mask": {
+                    "observation.state": [True] * 20,
+                    "action": [True] * 20,
+                },
+                "image_pixel_mask": {
+                    "path": "pixel_mask.npz",
+                    "key": "mask",
+                    "shape": [256, 256],
+                    "applies_to_all_available_images": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
+    dataset.camera_keys = CANONICAL_CAMERA_KEYS
+    with pytest.raises(ValueError, match="contains disabled fields"):
+        dataset._load_mask_and_mapping_contract(path, "invalid")
 
 
 def test_canonical_video_preparation_only_normalizes_fixed_uint8_frames() -> None:
@@ -235,11 +307,12 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
             "task_index": True,
         }
     )
-    mask_path = tmp_path / "mask.json"
-    mask_path.write_text(
+    mask_and_mapping_path = tmp_path / "mask_and_mapping.json"
+    mask_and_mapping_path.write_text(
         json.dumps(
             {
                 "dataset": "synthetic",
+                "field_mapping": {},
                 "image_pixel_mask": {
                     "path": "pixel_mask.npz",
                     "key": "mask",
@@ -269,8 +342,8 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
     )
 
     class FakeTableBackend:
-        def read_catalog(self, camera_keys, camera_mask):
-            del camera_keys, camera_mask
+        def read_catalog(self, camera_keys, camera_mask, field_mapping):
+            del camera_keys, camera_mask, field_mapping
             return {0: "synthetic task"}, [
                 {
                     "episode_index": 0,
@@ -280,8 +353,16 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
                 }
             ]
 
-        def read_rows(self, episode, relative_indices, field_mask, camera_keys, camera_mask):
-            del episode, field_mask, camera_keys, camera_mask
+        def read_rows(
+            self,
+            episode,
+            relative_indices,
+            field_mask,
+            field_mapping,
+            camera_keys,
+            camera_mask,
+        ):
+            del episode, field_mask, field_mapping, camera_keys, camera_mask
             rows = {}
             for frame in sorted({0, *relative_indices.tolist()}):
                 tcp10 = [
@@ -324,7 +405,7 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
             {
                 "name": "synthetic",
                 "path": str(root),
-                "mask_path": str(mask_path),
+                "mask_and_mapping_path": str(mask_and_mapping_path),
                 "normalization_stats_path": str(stats_path),
             }
         ],

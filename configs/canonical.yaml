@@ -4,7 +4,7 @@ dataset:
   dataset_dirs:
     - name: libero
       path: /path/to/canonical/libero
-      mask_path: /path/to/canonical/libero/mask.json
+      mask_and_mapping_path: /path/to/canonical/libero/mask_and_mapping.json
       normalization_stats_path: /path/to/stats/libero.json
 
   timeline:

@@ -20,12 +20,12 @@ dataset:
   dataset_dirs:
     - name: libero
       path: /path/to/canonical/libero
-      mask_path: /path/to/canonical/libero/mask.json
+      mask_and_mapping_path: /path/to/canonical/libero/mask_and_mapping.json
       normalization_stats_path: /path/to/stats/libero.json
 
     - name: hy_embodied
       path: /path/to/canonical/hy_embodied
-      mask_path: /path/to/canonical/hy_embodied/mask.json
+      mask_and_mapping_path: /path/to/canonical/hy_embodied/mask_and_mapping.json
       normalization_stats_path: /path/to/stats/hy_embodied.json
 
   timeline:
@@ -130,8 +130,10 @@ Loading ABI 始终保留 `state[N,K,128]` 和 `action[N,K,128]`。如果模型�
 | identity fields | scalar | `timestamp/frame_index/episode_index/index/task_index` |
 
 每臂 TCP10 为 XYZ `[3]`、row-major Rot6D `[6]`、absolute gripper openness `[1]`。
-每个 `dataset_dirs` 条目必须提供 `mask_path` 和离线生成的
-`normalization_stats_path`；Dataset 不在训练时统计或猜测缺失字段。
+每个 `dataset_dirs` 条目必须提供 `mask_and_mapping_path` 和离线生成的
+`normalization_stats_path`。前者同时定义 canonical 字段有效性和
+`canonical key -> physical storage key` 映射；Dataset 不在训练时统计、猜测缺失字段或
+兼容旧 `mask_path`。
 
 物理目录拓扑、mask JSON、时间轴、插值、relative pose、normalization 和 TCP128D 规划见
 [Canonical Data Contract](docs/data-contract.md)。

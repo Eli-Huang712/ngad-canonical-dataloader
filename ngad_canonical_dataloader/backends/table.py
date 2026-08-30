@@ -20,6 +20,11 @@ def _lance_column(key: str) -> str:
     return key.replace(".", "_")
 
 
+def _physical_key(canonical_key: str, field_mapping: dict[str, str]) -> str:
+    """Resolve the required canonical-to-physical mapping contract."""
+    return field_mapping.get(canonical_key, canonical_key)
+
+
 class LanceTableBackend:
     """Read canonical metadata and rows from one Lance/JPEG physical root."""
 
@@ -32,9 +37,10 @@ class LanceTableBackend:
         self,
         camera_keys: tuple[str, ...],
         camera_mask: torch.Tensor,
+        field_mapping: dict[str, str],
     ) -> tuple[dict[int, str], list[dict[str, Any]]]:
         """Return tasks and episode offsets in the backend-neutral episode schema."""
-        del camera_keys, camera_mask
+        del camera_keys, camera_mask, field_mapping
         try:
             import pyarrow.dataset as ds
             import pyarrow.parquet as pq
@@ -81,6 +87,7 @@ class LanceTableBackend:
         episode: dict[str, Any],
         relative_indices: torch.Tensor,
         field_mask: dict[str, bool],
+        field_mapping: dict[str, str],
         camera_keys: tuple[str, ...],
         camera_mask: torch.Tensor,
     ) -> dict[int, dict[str, Any]]:
@@ -103,7 +110,13 @@ class LanceTableBackend:
             for camera, available in zip(camera_keys, camera_mask.tolist())
             if available
         )
-        columns = [*IDENTITY_KEYS, *(_lance_column(key) for key in value_keys)]
+        canonical_keys = [*IDENTITY_KEYS, *value_keys]
+        columns = list(
+            dict.fromkeys(
+                _lance_column(_physical_key(key, field_mapping))
+                for key in canonical_keys
+            )
+        )
         rows = self._dataset().take(
             pa.array(offsets, type=pa.int64()), columns=columns
         ).to_pylist()
@@ -111,18 +124,26 @@ class LanceTableBackend:
         # Lance take() consumes fragment-local physical offsets, while the
         # canonical index remains global across fragments and episodes.
         anchor_position = offsets.index(episode["dataset_from_index"])
-        global_index_start = int(rows[anchor_position]["index"])
+        anchor_row = {
+            key: rows[anchor_position][
+                _lance_column(_physical_key(key, field_mapping))
+            ]
+            for key in canonical_keys
+        }
+        global_index_start = int(anchor_row["index"])
         by_relative_index: dict[int, dict[str, Any]] = {}
-        for offset, row in zip(offsets, rows):
+        for offset, physical_row in zip(offsets, rows):
             relative_index = offset - episode["dataset_from_index"]
+            canonical_row = {
+                key: physical_row[_lance_column(_physical_key(key, field_mapping))]
+                for key in canonical_keys
+            }
             if (
-                int(row["index"]) != global_index_start + relative_index
-                or int(row["episode_index"]) != episode["episode_index"]
-                or int(row["frame_index"]) != relative_index
+                int(canonical_row["index"]) != global_index_start + relative_index
+                or int(canonical_row["episode_index"]) != episode["episode_index"]
+                or int(canonical_row["frame_index"]) != relative_index
             ):
                 raise RuntimeError(f"Canonical Lance row identity mismatch at offset {offset}.")
-            canonical_row = {key: row[key] for key in IDENTITY_KEYS}
-            canonical_row.update({key: row[_lance_column(key)] for key in value_keys})
             by_relative_index[relative_index] = canonical_row
         return by_relative_index
 
@@ -142,6 +163,7 @@ class ParquetTableBackend:
         self,
         camera_keys: tuple[str, ...],
         camera_mask: torch.Tensor,
+        field_mapping: dict[str, str],
     ) -> tuple[dict[int, str], list[dict[str, Any]]]:
         """Return tasks, episodes, Parquet offsets and per-camera video ranges."""
         try:
@@ -152,10 +174,14 @@ class ParquetTableBackend:
 
         task_rows = pq.read_table(self.root / "meta" / "tasks.parquet").to_pylist()
         tasks = {int(row["task_index"]): str(row["task"]) for row in task_rows}
-        video_columns = [
-            f"videos/{camera}/{field}"
+        camera_pairs = [
+            (camera, _physical_key(camera, field_mapping))
             for camera, available in zip(camera_keys, camera_mask.tolist())
             if available
+        ]
+        video_columns = [
+            f"videos/{physical_camera}/{field}"
+            for _, physical_camera in camera_pairs
             for field in ("chunk_index", "file_index", "from_timestamp", "to_timestamp")
         ]
         columns = [
@@ -190,16 +216,18 @@ class ParquetTableBackend:
                 "data_file_index": int(row["data/file_index"]),
                 "videos": {
                     camera: {
-                        field: row[f"videos/{camera}/{field}"]
-                        for field in (
-                            "chunk_index",
-                            "file_index",
-                            "from_timestamp",
-                            "to_timestamp",
-                        )
+                        "physical_key": physical_camera,
+                        **{
+                            field: row[f"videos/{physical_camera}/{field}"]
+                            for field in (
+                                "chunk_index",
+                                "file_index",
+                                "from_timestamp",
+                                "to_timestamp",
+                            )
+                        },
                     }
-                    for camera, available in zip(camera_keys, camera_mask.tolist())
-                    if available
+                    for camera, physical_camera in camera_pairs
                 },
             }
             if episode["dataset_to_index"] - episode["dataset_from_index"] != episode["length"]:
@@ -257,6 +285,7 @@ class ParquetTableBackend:
         episode: dict[str, Any],
         relative_indices: torch.Tensor,
         field_mask: dict[str, bool],
+        field_mapping: dict[str, str],
         camera_keys: tuple[str, ...],
         camera_mask: torch.Tensor,
     ) -> dict[int, dict[str, Any]]:
@@ -279,8 +308,13 @@ class ParquetTableBackend:
         if not local_rows or min(local_rows) < 0 or max(local_rows) >= row_group_ends[-1]:
             raise IndexError(f"LeRobot v3 episode offsets exceed their data shard: {episode}.")
 
-        columns = [*IDENTITY_KEYS, STATE_KEY]
-        columns.extend(key for key in TACTILE_KEYS if field_mask[key])
+        canonical_columns = [*IDENTITY_KEYS, STATE_KEY]
+        canonical_columns.extend(key for key in TACTILE_KEYS if field_mask[key])
+        columns = list(
+            dict.fromkeys(
+                _physical_key(key, field_mapping) for key in canonical_columns
+            )
+        )
         by_row_group: dict[int, list[int]] = {}
         for local_row in sorted(local_rows):
             row_group_index = bisect_right(row_group_ends, local_row)
@@ -293,9 +327,13 @@ class ParquetTableBackend:
             table = table.take(
                 pa.array([row - group_start for row in group_rows], type=pa.int64())
             )
-            for local_row, row in zip(group_rows, table.to_pylist()):
+            for local_row, physical_row in zip(group_rows, table.to_pylist()):
                 relative_index = local_rows[local_row]
                 global_index = episode["dataset_from_index"] + relative_index
+                row = {
+                    key: physical_row[_physical_key(key, field_mapping)]
+                    for key in canonical_columns
+                }
                 if (
                     int(row["index"]) != global_index
                     or int(row["episode_index"]) != episode["episode_index"]

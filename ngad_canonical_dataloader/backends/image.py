@@ -65,7 +65,7 @@ class H264ImageBackend:
 
         video_meta = episode["videos"][camera]
         video_path = self.root / str(self.info["video_path"]).format(
-            video_key=camera,
+            video_key=video_meta["physical_key"],
             chunk_index=video_meta["chunk_index"],
             file_index=video_meta["file_index"],
         )

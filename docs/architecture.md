@@ -49,7 +49,7 @@ config.py
   ▼
 Dataset.__init__()
 发现 physical roots → 选择 backend → 读取 task/episode metadata
-→ 加载 mask/stats → 建立统一全局 anchor 索引与 TimelineLayout
+→ 加载 mask/mapping/stats → 建立统一全局 anchor 索引与 TimelineLayout
   │
   ▼
 Dataset.__getitem__()
@@ -70,7 +70,7 @@ video + state + action + masks + timestamps + prompt + data_info
 - 展开单 root、table/fragment collection 或 shard collection；
 - 识别唯一物理 backend；
 - 读取 task/episode metadata、source FPS、episode offsets 和视频时间范围；
-- 加载每个数据集自己的 mask contract 和 normalization stats；
+- 加载每个数据集自己的 mask-and-mapping contract 和 normalization stats；
 - 按 Episode 完成 train/validation split；
 - 根据每个 Episode 的目标 RGB 长度建立全局 anchor 前缀和；
 - 建立固定 `TimelineLayout` 和 offset→position 映射。
@@ -97,8 +97,8 @@ video + state + action + masks + timestamps + prompt + data_info
 | `ngad_canonical_dataloader/datasets/__init__.py` | 只导出唯一 public Dataset，隔离具体实现文件 |
 | `ngad_canonical_dataloader/datasets/canonical.py` | 实现 `NGADCanonicalDataset.__init__()`、`__getitem__()`、全局 Episode/anchor 索引和最终 sample 组装 |
 | `ngad_canonical_dataloader/backends/__init__.py` | 根据 physical root 特征选择唯一的 table/image backend 组合 |
-| `ngad_canonical_dataloader/backends/table.py` | 读取 Lance 或 LeRobot v3 Parquet 的 task、episode metadata 与 canonical 行 |
-| `ngad_canonical_dataloader/backends/image.py` | 将 Lance JPEG payload 或 LeRobot v3 H.264 视频解码为统一的 `uint8[T,3,256,256]` RGB tensor |
+| `ngad_canonical_dataloader/backends/table.py` | 按 canonical→physical mapping 读取 Lance 或 LeRobot v3 Parquet 的 task、episode metadata 与数据行，并恢复 canonical key |
+| `ngad_canonical_dataloader/backends/image.py` | 按映射后的物理相机 key 将 Lance JPEG payload 或 LeRobot v3 H.264 视频解码为统一的 `uint8[T,3,256,256]` RGB tensor |
 | `ngad_canonical_dataloader/windows.py` | 展开语义 `frame_ranges`，建立 offset→position 映射和 Episode 内 RGB/Action validity |
 | `ngad_canonical_dataloader/action.py` | absolute TCP 插值、Rot6D/SO(3) 转换、relative pose、normalization 和 TCP20→TCP128 packing |
 | `configs/canonical.yaml` | 可直接复制修改的统一时间轴与多数据集配置模板 |
@@ -118,7 +118,7 @@ video + state + action + masks + timestamps + prompt + data_info
 本仓库不负责：
 
 - 把 LIBERO、Hy-Embodied、UMI 等 raw 数据转换成 canonical 数据；
-- 生成或训练时统计 normalization stats、field/element/pixel mask；
+- 生成或训练时统计 normalization stats、field mapping、field/element/pixel mask；
 - `DistributedSampler`、PyTorch `DataLoader`、collate、prefetch 或 pinned memory；
 - `_extract_wam_batch()`、GPU transfer 或 dtype/device 策略；
 - Tokenizer、VAE、camera/token attention、flow target/noise、loss 或模型 forward；

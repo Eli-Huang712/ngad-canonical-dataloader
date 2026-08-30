@@ -198,12 +198,12 @@ class NGADCanonicalDataset(Dataset):
             if not isinstance(entry, dict) or set(entry) != {
                 "name",
                 "path",
-                "mask_path",
+                "mask_and_mapping_path",
                 "normalization_stats_path",
             }:
                 raise TypeError(
-                    "Each dataset_dirs entry must contain exactly name, path, mask_path, "
-                    "and normalization_stats_path."
+                    "Each dataset_dirs entry must contain exactly name, path, "
+                    "mask_and_mapping_path, and normalization_stats_path."
                 )
             name = str(entry["name"]).strip()
             if not name or name in dataset_names:
@@ -213,8 +213,8 @@ class NGADCanonicalDataset(Dataset):
                 {
                     "name": name,
                     "path": Path(os.path.expanduser(str(entry["path"]))).resolve(),
-                    "mask_path": Path(
-                        os.path.expanduser(str(entry["mask_path"]))
+                    "mask_and_mapping_path": Path(
+                        os.path.expanduser(str(entry["mask_and_mapping_path"]))
                     ).resolve(),
                     "normalization_stats_path": Path(
                         os.path.expanduser(str(entry["normalization_stats_path"]))
@@ -263,8 +263,8 @@ class NGADCanonicalDataset(Dataset):
             transform = self._normalization_transform(stats)
             transforms[configured["name"]] = transform
             normalization_stats[configured["name"]] = stats
-            mask_contract = self._load_mask_contract(
-                configured["mask_path"], configured["name"]
+            mask_contract = self._load_mask_and_mapping_contract(
+                configured["mask_and_mapping_path"], configured["name"]
             )
             mask_contract["pixel_mask"] = self._load_pixel_mask(mask_contract)
             mask_contracts[configured["name"]] = mask_contract
@@ -289,7 +289,9 @@ class NGADCanonicalDataset(Dataset):
                     f"rgb_rate_hz {self.rgb_rate_hz}; RGB anchors must be real frames."
                 )
             tasks, episodes = table_backend.read_catalog(
-                self.camera_keys, mask_contract["camera_mask"]
+                self.camera_keys,
+                mask_contract["camera_mask"],
+                mask_contract["field_mapping"],
             )
             train_episodes, validation_episodes = split_episode_indices(
                 [episode["episode_index"] for episode in episodes],
@@ -306,6 +308,7 @@ class NGADCanonicalDataset(Dataset):
                     "normalization_id": configured["name"],
                     "tcp_transform": transforms[configured["name"]],
                     "field_mask": mask_contract["field_mask"],
+                    "field_mapping": mask_contract["field_mapping"],
                     "state_element_mask": mask_contract["state_element_mask"],
                     "action_element_mask": mask_contract["action_element_mask"],
                     "camera_mask": mask_contract["camera_mask"],
@@ -345,10 +348,20 @@ class NGADCanonicalDataset(Dataset):
         }
         self._tcp_transforms = transforms
 
-    def _load_mask_contract(self, path: Path, dataset_name: str) -> dict[str, Any]:
-        """Load one required canonical sidecar without backend-derived defaults."""
+    def _load_mask_and_mapping_contract(
+        self,
+        path: Path,
+        dataset_name: str,
+    ) -> dict[str, Any]:
+        """Load one strict canonical validity and physical-field contract."""
         value = _read_json_object(path)
-        expected_sections = {"dataset", "image_pixel_mask", "field_mask", "element_mask"}
+        expected_sections = {
+            "dataset",
+            "field_mapping",
+            "field_mask",
+            "element_mask",
+            "image_pixel_mask",
+        }
         if set(value) != expected_sections:
             raise ValueError(f"{path} must contain exactly {sorted(expected_sections)}.")
         if value["dataset"] != dataset_name:
@@ -376,6 +389,34 @@ class NGADCanonicalDataset(Dataset):
         if disabled_required:
             raise ValueError(
                 f"{path} disables fields required for window construction: {disabled_required}."
+            )
+
+        field_mapping = value["field_mapping"]
+        if not isinstance(field_mapping, dict):
+            raise TypeError(f"{path} field_mapping must be an object.")
+        unknown_mapping_keys = sorted(set(field_mapping).difference(expected_fields))
+        if unknown_mapping_keys:
+            raise ValueError(
+                f"{path} field_mapping contains non-canonical keys: "
+                f"{unknown_mapping_keys}."
+            )
+        disabled_mapping_keys = sorted(
+            key for key in field_mapping if not field_mask[key]
+        )
+        if disabled_mapping_keys:
+            raise ValueError(
+                f"{path} field_mapping contains disabled fields: "
+                f"{disabled_mapping_keys}."
+            )
+        invalid_physical_keys = sorted(
+            canonical
+            for canonical, physical in field_mapping.items()
+            if not isinstance(physical, str) or not physical.strip()
+        )
+        if invalid_physical_keys:
+            raise ValueError(
+                f"{path} field_mapping values must be non-empty strings: "
+                f"{invalid_physical_keys}."
             )
 
         element_mask = value["element_mask"]
@@ -433,6 +474,7 @@ class NGADCanonicalDataset(Dataset):
             raise ValueError(f"{path} must enable at least one canonical camera.")
         return {
             "field_mask": field_mask,
+            "field_mapping": dict(field_mapping),
             "camera_mask": camera_mask,
             "tactile_mask": torch.tensor(
                 [
@@ -525,7 +567,7 @@ class NGADCanonicalDataset(Dataset):
         features: dict[str, Any],
         contract: dict[str, Any],
     ) -> None:
-        """Validate only fields declared available by the canonical mask sidecar."""
+        """Validate mapped physical fields declared available by the sidecar."""
         expected = {
             CANONICAL_STATE_KEY: [20],
             CANONICAL_ACTION_KEY: [20],
@@ -537,17 +579,39 @@ class NGADCanonicalDataset(Dataset):
             "index": [1],
             "task_index": [1],
         }
-        for name, shape in expected.items():
-            if contract["field_mask"][name] and features.get(name, {}).get("shape") != shape:
-                raise ValueError(f"{root} feature {name} must have shape {shape}.")
+        for canonical_name, shape in expected.items():
+            if not contract["field_mask"][canonical_name]:
+                continue
+            physical_name = contract["field_mapping"].get(
+                canonical_name, canonical_name
+            )
+            if physical_name not in features:
+                raise ValueError(
+                    f"{root} mapping for canonical field {canonical_name!r} points "
+                    f"to missing physical field {physical_name!r}."
+                )
+            if features[physical_name].get("shape") != shape:
+                raise ValueError(
+                    f"{root} physical feature {physical_name!r} mapped from "
+                    f"{canonical_name!r} must have shape {shape}."
+                )
         expected_image_dtype = "video"
-        for camera, available in zip(self.camera_keys, contract["camera_mask"].tolist()):
+        for camera, available in zip(
+            self.camera_keys, contract["camera_mask"].tolist()
+        ):
             if not available:
                 continue
-            feature = features.get(camera, {})
+            physical_camera = contract["field_mapping"].get(camera, camera)
+            if physical_camera not in features:
+                raise ValueError(
+                    f"{root} mapping for canonical camera {camera!r} points to "
+                    f"missing physical field {physical_camera!r}."
+                )
+            feature = features[physical_camera]
             if feature.get("dtype") != expected_image_dtype or feature.get("shape") != [256, 256, 3]:
                 raise ValueError(
-                    f"{root} camera {camera} must be {expected_image_dtype} [256,256,3]."
+                    f"{root} physical camera {physical_camera!r} mapped from "
+                    f"{camera!r} must be {expected_image_dtype} [256,256,3]."
                 )
 
     @staticmethod
@@ -672,6 +736,7 @@ class NGADCanonicalDataset(Dataset):
             episode,
             requested,
             meta["field_mask"],
+            meta["field_mapping"],
             self.camera_keys,
             meta["camera_mask"],
         )

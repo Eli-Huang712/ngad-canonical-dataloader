@@ -88,13 +88,39 @@ H.264 编码。两个后端都必须通过 episode metadata 提供 Episode 长�
 `observation.state` 和五个 identity 字段必须物理存在。相机、tactile 和落盘 `action`
 是否物理存在，由每个数据集自己的 mask JSON 明确声明。
 
-## 3. Mask 与 Normalization 输入
+## 3. Field Mapping、Mask 与 Normalization 输入
 
 每个 `dataset_dirs` 条目必须显式提供：
 
-- `mask_path`：定义 `field_mask`、state/action 的 `element_mask[20]`，以及共享的
-  `image_pixel_mask` NPZ 路径和 key；
+- `mask_and_mapping_path`：同时定义 `field_mapping`、`field_mask`、state/action 的
+  `element_mask[20]`，以及共享的 `image_pixel_mask` NPZ 路径和 key；
 - `normalization_stats_path`：该数据集已经离线统计完成的 normalization JSON。
+
+`mask_and_mapping_path` 指向的 JSON 顶层必须严格为：
+
+```json
+{
+  "dataset": "hy_embodied",
+  "field_mapping": {
+    "observation.images.cam_head_left": "observation.images.cam_head",
+    "observation.images.cam_left_wrist_left": "observation.images.cam_left_wrist",
+    "observation.images.cam_right_wrist_left": "observation.images.cam_right_wrist"
+  },
+  "field_mask": {},
+  "element_mask": {},
+  "image_pixel_mask": {}
+}
+```
+
+`field_mapping` 的方向固定为 `canonical key -> physical storage key`。未出现在
+`field_mapping` 中的可用字段采用 canonical 与 physical 同名语义；只要二者不同，就必须
+显式映射。`field_mask` 和 `element_mask` 始终使用 canonical key。`field_mask=false`
+的字段禁止出现在 `field_mapping` 中；映射目标未出现在 physical root 的
+`meta/info.json.features` 时，Dataset 初始化立即报错。
+
+Lance backend 在实际取列时把映射后的 dotted physical key 转成 underscore column，例如
+`observation.images.cam_head` → `observation_images_cam_head`；LeRobot backend 直接用映射后的
+相机 key 解析 episode video metadata 和 `video_path`。
 
 `field_mask` 必须覆盖六路相机、state、action、两个 tactile 字段和五个 identity 字段。
 不可用的相机输出黑图，同时 `camera_mask=False`、`image_pixel_mask=False`；不可用的 tactile

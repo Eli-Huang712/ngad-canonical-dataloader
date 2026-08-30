@@ -50,22 +50,27 @@ class TimelineConfig:
 
 @dataclass(frozen=True)
 class DatasetRootConfig:
-    """One named root with its canonical masks and normalization statistics."""
+    """One named root with its field contract and normalization statistics."""
 
     name: str
     path: str
-    mask_path: str
+    mask_and_mapping_path: str
     normalization_stats_path: str
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "DatasetRootConfig":
-        expected = {"name", "path", "mask_path", "normalization_stats_path"}
+        expected = {
+            "name",
+            "path",
+            "mask_and_mapping_path",
+            "normalization_stats_path",
+        }
         if set(value) != expected:
             raise ValueError(f"Each dataset root must contain exactly {sorted(expected)}.")
         return cls(
             name=str(value["name"]),
             path=str(value["path"]),
-            mask_path=str(value["mask_path"]),
+            mask_and_mapping_path=str(value["mask_and_mapping_path"]),
             normalization_stats_path=str(value["normalization_stats_path"]),
         )
 
@@ -73,7 +78,7 @@ class DatasetRootConfig:
         return {
             "name": self.name,
             "path": self.path,
-            "mask_path": self.mask_path,
+            "mask_and_mapping_path": self.mask_and_mapping_path,
             "normalization_stats_path": self.normalization_stats_path,
         }
 
