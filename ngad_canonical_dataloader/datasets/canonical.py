@@ -58,6 +58,13 @@ CANONICAL_IDENTITY_KEYS = (
 )
 CANONICAL_IMAGE_SIZE = 256
 DEFAULT_PROMPT = "A video recorded from a robot's point of view executing the following instruction: {task}"
+TABLE_MANIFEST_COLUMNS = {
+    "table_index",
+    "table_name",
+    "relative_path",
+    "num_episodes",
+    "num_frames",
+}
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -66,6 +73,95 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"Expected a JSON object in {path}.")
     return value
+
+
+def _read_table_manifest(dataset_root: Path) -> list[dict[str, Any]]:
+    """Read the only supported dataset-root topology from tables.parquet."""
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except ImportError as error:
+        raise ImportError("Canonical table manifests require pyarrow.") from error
+
+    manifest_path = dataset_root / "tables.parquet"
+    if not manifest_path.is_file():
+        raise ValueError(f"{dataset_root} must contain tables.parquet.")
+    table = pq.read_table(manifest_path)
+    if set(table.column_names) != TABLE_MANIFEST_COLUMNS:
+        raise ValueError(
+            f"{manifest_path} columns must exactly match "
+            f"{sorted(TABLE_MANIFEST_COLUMNS)}."
+        )
+    expected_types = {
+        "table_index": pa.int64(),
+        "table_name": pa.string(),
+        "relative_path": pa.string(),
+        "num_episodes": pa.int64(),
+        "num_frames": pa.int64(),
+    }
+    for name, expected_type in expected_types.items():
+        if table.schema.field(name).type != expected_type:
+            raise ValueError(
+                f"{manifest_path} column {name!r} must be {expected_type}, "
+                f"got {table.schema.field(name).type}."
+            )
+
+    rows = table.to_pylist()
+    if not rows:
+        raise ValueError(f"{manifest_path} must list at least one table.")
+    seen_indices: set[int] = set()
+    seen_names: set[str] = set()
+    seen_paths: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    resolved_dataset_root = dataset_root.resolve()
+    for row in rows:
+        table_index = int(row["table_index"])
+        table_name = str(row["table_name"])
+        relative_path = str(row["relative_path"])
+        num_episodes = int(row["num_episodes"])
+        num_frames = int(row["num_frames"])
+        relative = Path(relative_path)
+        if (
+            table_index < 0
+            or not table_name
+            or relative.is_absolute()
+            or len(relative.parts) != 1
+            or relative.parts[0] in {"", ".", ".."}
+            or table_name != relative_path
+            or num_episodes <= 0
+            or num_frames <= 0
+        ):
+            raise ValueError(f"Invalid table manifest row in {manifest_path}: {row}.")
+        if (
+            table_index in seen_indices
+            or table_name in seen_names
+            or relative_path in seen_paths
+        ):
+            raise ValueError(f"Duplicate table manifest row in {manifest_path}: {row}.")
+        table_root = (resolved_dataset_root / relative).resolve()
+        if table_root.parent != resolved_dataset_root or not table_root.is_dir():
+            raise ValueError(
+                f"{manifest_path} points to invalid table directory {relative_path!r}."
+            )
+        seen_indices.add(table_index)
+        seen_names.add(table_name)
+        seen_paths.add(relative_path)
+        normalized.append(
+            {
+                "table_index": table_index,
+                "table_name": table_name,
+                "table_root": table_root,
+                "num_episodes": num_episodes,
+                "num_frames": num_frames,
+            }
+        )
+    ordered = sorted(normalized, key=lambda row: row["table_index"])
+    dataset_from_index = 0
+    for row in ordered:
+        row["dataset_from_index"] = dataset_from_index
+        dataset_from_index += row["num_frames"]
+        row["dataset_to_index"] = dataset_from_index
+    return ordered
 
 
 class CanonicalTCPTransform:
@@ -222,24 +318,12 @@ class NGADCanonicalDataset(Dataset):
                 }
             )
 
-        physical_roots: list[tuple[Path, dict[str, Any]]] = []
+        physical_tables: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for configured in configured_roots:
             configured_root = configured["path"]
-            if (configured_root / "meta" / "info.json").is_file():
-                physical_roots.append((configured_root, configured))
-                continue
-            fragment_infos = sorted(
-                configured_root.glob("table_*/fragments/*/meta/info.json")
-            )
-            if not fragment_infos:
-                fragment_infos = sorted(configured_root.glob("shard_*/meta/info.json"))
-            if not fragment_infos:
-                raise ValueError(
-                    f"{configured_root} is not a supported canonical root or shard collection."
-                )
-            physical_roots.extend(
-                (info_path.parent.parent, configured)
-                for info_path in fragment_infos
+            physical_tables.extend(
+                (table_record, configured)
+                for table_record in _read_table_manifest(configured_root)
             )
 
         self.camera_keys = self.expected_camera_keys
@@ -269,9 +353,15 @@ class NGADCanonicalDataset(Dataset):
             mask_contract["pixel_mask"] = self._load_pixel_mask(mask_contract)
             mask_contracts[configured["name"]] = mask_contract
 
-        for root_index, (root, configured) in enumerate(physical_roots):
+        for root_index, (table_record, configured) in enumerate(physical_tables):
+            root = table_record["table_root"]
             info = _read_json_object(root / "meta" / "info.json")
-            table_backend, image_backend = create_storage_backends(root, info)
+            table_backend, image_backend = create_storage_backends(
+                root,
+                table_record["table_name"],
+                table_record["dataset_from_index"],
+                info,
+            )
             mask_contract = mask_contracts[configured["name"]]
             self._validate_features(root, info.get("features", {}), mask_contract)
             source_fps = float(info.get("fps", 0.0))
@@ -293,6 +383,31 @@ class NGADCanonicalDataset(Dataset):
                 mask_contract["camera_mask"],
                 mask_contract["field_mapping"],
             )
+            if len(episodes) != table_record["num_episodes"]:
+                raise ValueError(
+                    f"{root} has {len(episodes)} episodes but tables.parquet declares "
+                    f"{table_record['num_episodes']}."
+                )
+            frame_count = sum(int(episode["length"]) for episode in episodes)
+            if frame_count != table_record["num_frames"]:
+                raise ValueError(
+                    f"{root} has {frame_count} frames but tables.parquet declares "
+                    f"{table_record['num_frames']}."
+                )
+            expected_episode_start = table_record["dataset_from_index"]
+            for episode in episodes:
+                if episode["dataset_from_index"] != expected_episode_start:
+                    raise ValueError(
+                        f"{root} episode offsets must be contiguous global indices; "
+                        f"expected {expected_episode_start}, got "
+                        f"{episode['dataset_from_index']}."
+                    )
+                expected_episode_start = episode["dataset_to_index"]
+            if expected_episode_start != table_record["dataset_to_index"]:
+                raise ValueError(
+                    f"{root} episode offsets end at {expected_episode_start}, "
+                    f"expected {table_record['dataset_to_index']}."
+                )
             train_episodes, validation_episodes = split_episode_indices(
                 [episode["episode_index"] for episode in episodes],
                 validation_split=float(validation_split),

@@ -48,12 +48,12 @@ config.py
   │
   ▼
 Dataset.__init__()
-发现 physical roots → 选择 backend → 读取 task/episode metadata
+读取 tables.parquet → 按 info.json 选择 backend → 读取 task/episode metadata
 → 加载 mask/mapping/stats → 建立统一全局 anchor 索引与 TimelineLayout
   │
   ▼
 Dataset.__getitem__()
-global index → root/episode/anchor → 解析 RGB/State/Action 时间点
+global index → table/episode/anchor → 解析 RGB/State/Action 时间点
 → table/image backend 按需读取 → absolute TCP 插值
 → absolute State + anchor-relative Action → normalization → TCP128
 → 组合 temporal/camera/pixel/feature mask 与 metadata
@@ -67,8 +67,8 @@ video + state + action + masks + timestamps + prompt + data_info
 它完成：
 
 - 解析具名 `dataset_dirs`；
-- 展开单 root、table/fragment collection 或 shard collection；
-- 识别唯一物理 backend；
+- 从 `tables.parquet` 读取唯一的已发布 table 清单；
+- 根据 `info.json.storage_backend` 选择唯一物理 backend；
 - 读取 task/episode metadata、source FPS、episode offsets 和视频时间范围；
 - 加载每个数据集自己的 mask-and-mapping contract 和 normalization stats；
 - 按 Episode 完成 train/validation split；
@@ -78,7 +78,7 @@ video + state + action + masks + timestamps + prompt + data_info
 `Dataset.__getitem__()` 抽到具体 anchor 后才把语义 offset 实例化为当前 Episode 的 timestamp
 与 source index，并只读取当前 sample 需要的数据行和图像。它完成：
 
-- global index → physical root / Episode / anchor；
+- global index → physical table / Episode / anchor；
 - 生成 RGB/Action target index 和 Episode validity；
 - 将 RGB target 映射到真实 source frame；
 - 为高频 absolute TCP state 生成插值 bracket；
@@ -96,7 +96,7 @@ video + state + action + masks + timestamps + prompt + data_info
 | `ngad_canonical_dataloader/config.py` | 严格校验版本化 YAML，并转换为 Dataset 构造参数 |
 | `ngad_canonical_dataloader/datasets/__init__.py` | 只导出唯一 public Dataset，隔离具体实现文件 |
 | `ngad_canonical_dataloader/datasets/canonical.py` | 实现 `NGADCanonicalDataset.__init__()`、`__getitem__()`、全局 Episode/anchor 索引和最终 sample 组装 |
-| `ngad_canonical_dataloader/backends/__init__.py` | 根据 physical root 特征选择唯一的 table/image backend 组合 |
+| `ngad_canonical_dataloader/backends/__init__.py` | 根据 `info.json.storage_backend` 选择唯一的 table/image backend 组合 |
 | `ngad_canonical_dataloader/backends/table.py` | 按 canonical→physical mapping 读取 Lance 或 LeRobot v3 Parquet 的 task、episode metadata 与数据行，并恢复 canonical key |
 | `ngad_canonical_dataloader/backends/image.py` | 按映射后的物理相机 key 将 Lance JPEG payload 或 LeRobot v3 H.264 视频解码为统一的 `uint8[T,3,256,256]` RGB tensor |
 | `ngad_canonical_dataloader/windows.py` | 展开语义 `frame_ranges`，建立 offset→position 映射和 Episode 内 RGB/Action validity |

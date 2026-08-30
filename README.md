@@ -107,6 +107,61 @@ Loading ABI 始终保留 `state[N,K,128]` 和 `action[N,K,128]`。如果模型�
 - Canonical Lance table + JPEG payload；
 - LeRobot v3 Parquet + H.264 MP4。
 
+### 期望的数据集文件拓扑
+
+Loader 只接受下面这一种 dataset-root 拓扑。`tables.parquet` 是唯一 table 清单；每个
+`table_xxx` 只能选择 Lance 或 Parquet 其中一种 payload，不允许同时存在两种 backend。
+
+```text
+<dataset-root>/
+├── tables.parquet
+│
+├── table_000/
+│   ├── meta/
+│   │   ├── info.json
+│   │   ├── tasks.parquet
+│   │   └── episodes/
+│   │       └── *.parquet
+│   │
+│   └── table_000.lance/             # Lance + inline JPEG
+│       ├── _transactions/
+│       ├── _versions/
+│       └── data/
+│           └── *.lance
+│
+├── table_001/
+│   ├── meta/
+│   │   ├── info.json
+│   │   ├── tasks.parquet
+│   │   └── episodes/
+│   │       └── *.parquet
+│   │
+│   ├── data/                         # Parquet
+│   │   └── .../*.parquet
+│   └── videos/                       # H.264
+│       └── <camera-key>/*.mp4
+│
+└── ...
+```
+
+`tables.parquet` 必须严格包含：
+
+```text
+table_index:   int64
+table_name:    string
+relative_path: string
+num_episodes:  int64
+num_frames:    int64
+```
+
+Loader 按 `table_index` 排序并对 `num_frames` 做前缀和，得到每张 table 的
+dataset-global `[dataset_from_index,dataset_to_index)`。每个 table 的 Episode offsets
+以及数据行 `index` 必须落在该全局区间；Lance 读取时才转换为 table-local physical offset。
+
+每张 table 的 `meta/info.json.storage_backend` 必须显式为 `lance_jpeg` 或
+`parquet_h264`。Loader 不扫描 single root、`fragments/*`、`shard_*`、`.work` 或
+`.publishing`，也不从目录内容猜测 backend。
+
 六路相机固定顺序：
 
 ```text

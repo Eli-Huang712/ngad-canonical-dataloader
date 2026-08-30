@@ -1,6 +1,8 @@
 import json
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import torch
 
@@ -12,6 +14,7 @@ from ngad_canonical_dataloader.datasets.canonical import (
     CANONICAL_CAMERA_KEYS,
     CANONICAL_TACTILE_DT_KEY,
     CANONICAL_TACTILE_VALUES_KEY,
+    _read_table_manifest,
 )
 from ngad_canonical_dataloader.datasets import canonical as canonical_module
 from ngad_canonical_dataloader.action import element_mask_to_feature_mask, pack_dual_arm_tcp
@@ -38,26 +41,91 @@ def test_fixed_canonical_abi_is_not_configurable() -> None:
 
 
 def test_storage_backend_factory_selects_only_supported_physical_pairs(tmp_path) -> None:
-    lance_root = tmp_path / "lance"
+    lance_table_root = tmp_path / "lance" / "table_000"
+    lance_root = lance_table_root / "table_000.lance"
     (lance_root / "_versions").mkdir(parents=True)
     (lance_root / "data").mkdir()
-    (lance_root / "data" / "canonical.lance").mkdir()
+    (lance_root / "data" / "fragment.lance").touch()
     table_backend, image_backend = create_storage_backends(
-        lance_root,
-        {"canonical_schema": "ngad_hy_canonical_lance_v2"},
+        lance_table_root,
+        "table_000",
+        120,
+        {
+            "storage_backend": "lance_jpeg",
+            "canonical_schema": "ngad_hy_canonical_lance_v2",
+        },
     )
     assert isinstance(table_backend, LanceTableBackend)
     assert isinstance(image_backend, JpegImageBackend)
+    assert table_backend.table_root == lance_table_root
+    assert table_backend.lance_root == lance_root
+    assert table_backend.table_from_index == 120
 
+    parquet_root = tmp_path / "lerobot" / "table_001"
+    (parquet_root / "data").mkdir(parents=True)
+    (parquet_root / "videos").mkdir()
     table_backend, image_backend = create_storage_backends(
-        tmp_path / "lerobot",
-        {"data_path": "data/{file_index}.parquet", "video_path": "videos/{video_key}.mp4"},
+        parquet_root,
+        "table_001",
+        200,
+        {
+            "storage_backend": "parquet_h264",
+            "data_path": "data/{file_index}.parquet",
+            "video_path": "videos/{video_key}.mp4",
+        },
     )
     assert isinstance(table_backend, ParquetTableBackend)
     assert isinstance(image_backend, H264ImageBackend)
 
-    with pytest.raises(ValueError, match="Cannot identify"):
-        create_storage_backends(tmp_path / "unknown", {})
+    with pytest.raises(ValueError, match="storage_backend"):
+        create_storage_backends(tmp_path / "unknown", "table_002", 0, {})
+
+
+def test_table_manifest_is_the_only_supported_dataset_topology(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must contain tables.parquet"):
+        _read_table_manifest(tmp_path)
+
+    table_root = tmp_path / "table_000"
+    table_root.mkdir()
+    second_table_root = tmp_path / "table_001"
+    second_table_root.mkdir()
+    pq.write_table(
+        pa.table(
+            {
+                "table_index": pa.array([1, 0], type=pa.int64()),
+                "table_name": pa.array(
+                    ["table_001", "table_000"], type=pa.string()
+                ),
+                "relative_path": pa.array(
+                    ["table_001", "table_000"], type=pa.string()
+                ),
+                "num_episodes": pa.array([1, 2], type=pa.int64()),
+                "num_frames": pa.array([20, 80], type=pa.int64()),
+            }
+        ),
+        tmp_path / "tables.parquet",
+    )
+    records = _read_table_manifest(tmp_path)
+    assert records == [
+        {
+            "table_index": 0,
+            "table_name": "table_000",
+            "table_root": table_root,
+            "num_episodes": 2,
+            "num_frames": 80,
+            "dataset_from_index": 0,
+            "dataset_to_index": 80,
+        },
+        {
+            "table_index": 1,
+            "table_name": "table_001",
+            "table_root": second_table_root,
+            "num_episodes": 1,
+            "num_frames": 20,
+            "dataset_from_index": 80,
+            "dataset_to_index": 100,
+        }
+    ]
 
 
 def test_canonical_feature_names_match_the_published_contract() -> None:
@@ -272,7 +340,20 @@ def test_canonical_video_preparation_only_normalizes_fixed_uint8_frames() -> Non
 
 def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> None:
     root = tmp_path / "canonical"
-    (root / "meta").mkdir(parents=True)
+    table_root = root / "table_000"
+    (table_root / "meta").mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "table_index": pa.array([0], type=pa.int64()),
+                "table_name": pa.array(["table_000"], type=pa.string()),
+                "relative_path": pa.array(["table_000"], type=pa.string()),
+                "num_episodes": pa.array([1], type=pa.int64()),
+                "num_frames": pa.array([40], type=pa.int64()),
+            }
+        ),
+        root / "tables.parquet",
+    )
     features = {
         "observation.state": {"shape": [20]},
         "action": {"shape": [20]},
@@ -288,8 +369,14 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
             for camera in CANONICAL_CAMERA_KEYS
         }
     )
-    (root / "meta" / "info.json").write_text(
-        json.dumps({"fps": 10, "features": features}),
+    (table_root / "meta" / "info.json").write_text(
+        json.dumps(
+            {
+                "storage_backend": "lance_jpeg",
+                "fps": 10,
+                "features": features,
+            }
+        ),
         encoding="utf-8",
     )
     np.savez(tmp_path / "pixel_mask.npz", mask=np.ones((256, 256), dtype=np.bool_))
@@ -398,7 +485,10 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(
         canonical_module,
         "create_storage_backends",
-        lambda root, info: (FakeTableBackend(), FakeImageBackend()),
+        lambda root, table_name, table_from_index, info: (
+            FakeTableBackend(),
+            FakeImageBackend(),
+        ),
     )
     dataset = NGADCanonicalDataset(
         dataset_dirs=[

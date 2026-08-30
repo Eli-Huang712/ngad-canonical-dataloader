@@ -26,10 +26,17 @@ def _physical_key(canonical_key: str, field_mapping: dict[str, str]) -> str:
 
 
 class LanceTableBackend:
-    """Read canonical metadata and rows from one Lance/JPEG physical root."""
+    """Read canonical metadata and rows from one Lance/JPEG physical table."""
 
-    def __init__(self, root: Path) -> None:
-        self.root = root
+    def __init__(
+        self,
+        table_root: Path,
+        lance_root: Path,
+        table_from_index: int,
+    ) -> None:
+        self.table_root = table_root
+        self.lance_root = lance_root
+        self.table_from_index = int(table_from_index)
         self._handle: Any | None = None
         self._pid = os.getpid()
 
@@ -47,10 +54,12 @@ class LanceTableBackend:
         except ImportError as error:
             raise ImportError("Lance canonical metadata requires pyarrow.") from error
 
-        task_rows = pq.read_table(self.root / "meta" / "tasks.parquet").to_pylist()
+        task_rows = pq.read_table(
+            self.table_root / "meta" / "tasks.parquet"
+        ).to_pylist()
         tasks = {int(row["task_index"]): str(row["task"]) for row in task_rows}
         episode_rows = ds.dataset(
-            self.root / "meta" / "episodes", format="parquet"
+            self.table_root / "meta" / "episodes", format="parquet"
         ).to_table(
             columns=["episode_index", "length", "dataset_from_index", "dataset_to_index"]
         ).to_pylist()
@@ -65,7 +74,9 @@ class LanceTableBackend:
         ]
         for episode in episodes:
             if episode["dataset_to_index"] - episode["dataset_from_index"] != episode["length"]:
-                raise ValueError(f"Invalid Lance episode offsets under {self.root}: {episode}.")
+                raise ValueError(
+                    f"Invalid Lance episode offsets under {self.table_root}: {episode}."
+                )
         return tasks, sorted(episodes, key=lambda row: row["dataset_from_index"])
 
     def _dataset(self):
@@ -79,7 +90,7 @@ class LanceTableBackend:
                 import lance
             except ImportError as error:
                 raise ImportError("Lance canonical roots require the pylance package.") from error
-            self._handle = lance.dataset(str(self.root))
+            self._handle = lance.dataset(str(self.lance_root))
         return self._handle
 
     def read_rows(
@@ -97,9 +108,12 @@ class LanceTableBackend:
         except ImportError as error:
             raise ImportError("Lance canonical roots require pyarrow.") from error
 
-        offsets = {episode["dataset_from_index"]}
+        episode_local_start = (
+            episode["dataset_from_index"] - self.table_from_index
+        )
+        offsets = {episode_local_start}
         offsets.update(
-            episode["dataset_from_index"] + int(relative_index)
+            episode_local_start + int(relative_index)
             for relative_index in relative_indices.tolist()
         )
         offsets = sorted(offsets)
@@ -121,25 +135,16 @@ class LanceTableBackend:
             pa.array(offsets, type=pa.int64()), columns=columns
         ).to_pylist()
 
-        # Lance take() consumes fragment-local physical offsets, while the
-        # canonical index remains global across fragments and episodes.
-        anchor_position = offsets.index(episode["dataset_from_index"])
-        anchor_row = {
-            key: rows[anchor_position][
-                _lance_column(_physical_key(key, field_mapping))
-            ]
-            for key in canonical_keys
-        }
-        global_index_start = int(anchor_row["index"])
         by_relative_index: dict[int, dict[str, Any]] = {}
         for offset, physical_row in zip(offsets, rows):
-            relative_index = offset - episode["dataset_from_index"]
+            relative_index = offset - episode_local_start
             canonical_row = {
                 key: physical_row[_lance_column(_physical_key(key, field_mapping))]
                 for key in canonical_keys
             }
             if (
-                int(canonical_row["index"]) != global_index_start + relative_index
+                int(canonical_row["index"])
+                != episode["dataset_from_index"] + relative_index
                 or int(canonical_row["episode_index"]) != episode["episode_index"]
                 or int(canonical_row["frame_index"]) != relative_index
             ):

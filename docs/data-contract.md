@@ -6,50 +6,66 @@ normalization、TCP128D packing 和完整输出 ABI。仓库在完整 Input Pipe
 
 ## 1. 物理存储后端
 
-一个 `dataset_dirs[].path` 可以指向单个 physical root，也可以指向 canonical shard
-collection：
+`dataset_dirs[].path` 必须指向包含 `tables.parquet` 的 dataset root。Loader 只从该
+manifest 枚举已发布 table，不扫描目录或接受 single-root、fragment、shard 等其他拓扑。
 
-- 单 root：`<path>/meta/info.json`；
-- table/fragment collection：`<path>/table_*/fragments/*/meta/info.json`；
-- shard collection：`<path>/shard_*/meta/info.json`。
+`tables.parquet` 列严格为：
 
-每个 physical root 由 `meta/info.json` 唯一识别为以下一种后端。
+| 列 | dtype | 语义 |
+|---|---|---|
+| `table_index` | `int64` | Dataset 内 table 顺序；决定全局索引拼接顺序 |
+| `table_name` | `string` | table 目录名，例如 `table_000` |
+| `relative_path` | `string` | dataset root 下的直接子目录，必须等于 `table_name` |
+| `num_episodes` | `int64` | table 的 Episode 数量 |
+| `num_frames` | `int64` | table 的总帧数；用于计算全局 frame prefix sum |
+
+Loader 会对 manifest 唯一性、目录边界、Episode 数量和总帧数做严格校验。每个 table 的
+`meta/info.json.storage_backend` 必须显式选择以下一种 backend；两种 payload 互斥。
+Loader 按 `table_index` 排序，并对 `num_frames` 做前缀和生成每张 table 的 dataset-global
+`[dataset_from_index,dataset_to_index)`。Episode metadata 与数据行 `index` 均保持全局
+索引；Lance backend 仅在执行 `take()` 前减去 table 的全局起点，转换为 physical row offset。
 
 ### 1.1 Lance + JPEG
 
 ```text
-<physical-root>/
-├── meta/
-│   ├── info.json
-│   ├── tasks.parquet
-│   └── episodes/
-│       └── *.parquet
-├── _versions/
-└── data/
-    └── *.lance
+<dataset-root>/
+└── table_000/
+    ├── meta/
+    │   ├── info.json
+    │   ├── tasks.parquet
+    │   └── episodes/
+    │       └── *.parquet
+    └── table_000.lance/
+        ├── _transactions/
+        ├── _versions/
+        └── data/
+            └── *.lance
 ```
 
-该后端要求 `info.json.canonical_schema == "ngad_hy_canonical_lance_v2"`，并且
-`data/` 中恰好存在一个 Lance 数据集。图像以 JPEG payload 存储在 Lance 行中。
+该后端要求 `storage_backend == "lance_jpeg"`、
+`canonical_schema == "ngad_hy_canonical_lance_v2"`，并且
+`<table-name>/<table-name>.lance/data/` 至少包含一个 `*.lance`。图像以 JPEG payload
+存储在 Lance 行中。
 
 ### 1.2 LeRobot v3 Parquet + H.264
 
 ```text
-<physical-root>/
-├── meta/
-│   ├── info.json
-│   ├── tasks.parquet
-│   └── episodes/
-│       └── *.parquet
-├── data/
-│   └── .../*.parquet
-└── videos/
-    └── .../*.mp4
+<dataset-root>/
+└── table_001/
+    ├── meta/
+    │   ├── info.json
+    │   ├── tasks.parquet
+    │   └── episodes/
+    │       └── *.parquet
+    ├── data/
+    │   └── .../*.parquet
+    └── videos/
+        └── .../*.mp4
 ```
 
-实际 Parquet 和 MP4 路径由 `info.json` 的 `data_path`、`video_path` 模板确定；视频使用
-H.264 编码。两个后端都必须通过 episode metadata 提供 Episode 长度、全局数据 offset 和
-任务索引。
+该后端要求 `storage_backend == "parquet_h264"`。实际 Parquet 和 MP4 路径由
+`info.json` 的 `data_path`、`video_path` 模板确定；视频使用 H.264 编码。两个后端都必须
+通过 episode metadata 提供 Episode 长度、全局数据 offset 和任务索引。
 
 ## 2. Canonical 输入字段
 
@@ -115,7 +131,7 @@ H.264 编码。两个后端都必须通过 episode metadata 提供 Episode 长�
 `field_mapping` 的方向固定为 `canonical key -> physical storage key`。未出现在
 `field_mapping` 中的可用字段采用 canonical 与 physical 同名语义；只要二者不同，就必须
 显式映射。`field_mask` 和 `element_mask` 始终使用 canonical key。`field_mask=false`
-的字段禁止出现在 `field_mapping` 中；映射目标未出现在 physical root 的
+的字段禁止出现在 `field_mapping` 中；映射目标未出现在 table 的
 `meta/info.json.features` 时，Dataset 初始化立即报错。
 
 Lance backend 在实际取列时把映射后的 dotted physical key 转成 underscore column，例如
@@ -328,7 +344,7 @@ State/Action time slot。
 |---|---|---|
 | `img_hw` | `float32[2]` | `[height,width]` |
 | `aspect_ratio` | scalar `float32` | `width / height` |
-| `root_index` | `int` | 当前 physical root 在 Dataset 内的索引 |
+| `root_index` | `int` | 当前 physical table 在 Dataset 内的索引 |
 | `episode_index` | `int` | 当前 Episode 标识 |
 | `task_index` | `int` | anchor 行的任务索引 |
 | `normalization_id` | `str` | 选择该 sample normalization stats 的数据集名称 |
