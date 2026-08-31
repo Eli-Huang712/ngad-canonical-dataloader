@@ -83,7 +83,7 @@ class DatasetRootConfig:
 class DatasetConfig:
     """All arguments required to construct :class:`NGADCanonicalDataset`."""
 
-    normalization_stats_path: str
+    normalization_stats_path: str | None
     dataset_dirs: tuple[DatasetRootConfig, ...]
     timeline: TimelineConfig
     max_samples: int | None = None
@@ -113,12 +113,12 @@ class DatasetConfig:
         if not isinstance(roots_value, list) or not roots_value:
             raise ValueError("dataset_dirs must be a non-empty list.")
         normalization_stats_path = value["normalization_stats_path"]
-        if (
+        if normalization_stats_path is not None and (
             not isinstance(normalization_stats_path, str)
             or not normalization_stats_path.strip()
         ):
             raise ValueError(
-                "dataset.normalization_stats_path must be a non-empty string."
+                "dataset.normalization_stats_path must be a non-empty string or null."
             )
         roots = tuple(DatasetRootConfig.from_mapping(root) for root in roots_value)
         return cls(

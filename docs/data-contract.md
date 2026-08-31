@@ -106,10 +106,15 @@ Parquet/H.264 的可用图像必须声明为 RGB `video[256,256,3]`；物理缺�
 `mask_and_mapping_path`。后者同时定义 `field_mapping`、`field_mask`、state/action 的
 `element_mask[20]`，以及共享的 `image_pixel_mask` NPZ 路径和 key。
 
-`dataset.normalization_stats_path` 是一次完整混合训练唯一的 global normalization JSON。
-LIBERO、Hy、UMI 和其他 canonical table 共用同一份统计；Dataset 只加载一次并只构造一个
-`CanonicalTCPTransform`。各 table 的原始 `meta/stats.json` 不是正式时间轴上重构的
-anchor-relative Action 统计，禁止直接作为 global normalization 输入。
+`dataset.normalization_stats_path` 是必填字段，并且是 sample mode 的唯一选择器：
+
+- 非空字符串：canonical mode。LIBERO、Hy、UMI 和其他 canonical table 共用这一份
+  global normalization；Dataset 只加载一次并只构造一个 `CanonicalTCPTransform`；
+- `null`：video-only mode。不读取 normalization 文件，不创建 TCP transform，不插值或
+  normalization state/action，也不生成 dummy stats 或伪造 TCP128。
+
+各 table 的原始 `meta/stats.json` 不是正式时间轴上重构的 anchor-relative Action 统计，
+禁止直接作为 canonical global normalization 输入。
 
 `mask_and_mapping_path` 指向的 JSON 顶层必须严格为：
 
@@ -269,6 +274,8 @@ gripper_action = absolute_openness_t
 
 ### 5.3 Global Normalization
 
+本节仅适用于 canonical mode；video-only mode 完全跳过本节和 TCP128 构造。
+
 | 特征 | State | Action |
 |---|---|---|
 | XYZ | 每只手臂、每个轴按 min/max 映射到 `[-1,1]`；越界值最终 clamp 到 `[-5,5]` | 每只手臂、每个轴除以对称 `action_xyz_scale`；保持零中心，不做 `[-1,1]` clamp |
@@ -303,6 +310,8 @@ State/Action time slot。
 
 设 `N = len(frame_offsets)`、`K = action_steps_per_rgb_frame`：
 
+两种模式共同返回：
+
 ```python
 {
     "video":                         float32[N, 6, 3, 256, 256],
@@ -311,27 +320,34 @@ State/Action time slot。
     "frame_timestamps":              float64[N],
     "frame_valid":                   bool[N],
 
-    "state":                         float32[N, K, 128],
-    "action":                        float32[N, K, 128],
-    "action_step_offsets":           int64[N, K],
-    "action_timestamps":             float64[N, K],
-    "action_valid":                  bool[N, K],
-
-    "state_feature_mask":            bool[128],
-    "action_feature_mask":           bool[128],
-    "observation_state_element_mask": bool[20],
-    "action_element_mask":           bool[20],
-
-    "observation.tactile.values":    float32[4, 3, 25, 6],
-    "observation.tactile.dt":        float32[4, 3],
-    "tactile_field_mask":            bool[2],
-
     "camera_mask":                   bool[N, 6],
     "image_pixel_mask":              bool[N, 6, 256, 256],
     "prompt":                        str,
     "data_info":                     dict,
 }
 ```
+
+Canonical mode 另外返回：
+
+```python
+{
+    "state":                         float32[N, K, 128],
+    "action":                        float32[N, K, 128],
+    "action_step_offsets":           int64[N, K],
+    "action_timestamps":             float64[N, K],
+    "action_valid":                  bool[N, K],
+    "state_feature_mask":            bool[128],
+    "action_feature_mask":           bool[128],
+    "observation_state_element_mask": bool[20],
+    "action_element_mask":           bool[20],
+    "observation.tactile.values":    float32[4, 3, 25, 6],
+    "observation.tactile.dt":        float32[4, 3],
+    "tactile_field_mask":            bool[2],
+}
+```
+
+Video-only mode 不返回上面的任何字段，尤其不返回 state/action、Action 时间轴或
+feature/element mask。
 
 `video` 已从 `uint8[0,255]` 转为 `float32[-1,1]`。State 与 Action 共用
 `action_step_offsets[N,K]`、`action_timestamps[N,K]` 和 `action_valid[N,K]`，不重复输出
@@ -341,6 +357,7 @@ State/Action time slot。
 
 | 字段 | 类型 / shape | 含义 |
 |---|---|---|
+| `sample_mode` | `str` | `"canonical"` 或 `"video_only"` |
 | `img_hw` | `float32[2]` | `[height,width]` |
 | `aspect_ratio` | scalar `float32` | `width / height` |
 | `root_index` | `int` | 当前 physical table 在 Dataset 内的索引 |

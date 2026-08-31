@@ -1,8 +1,9 @@
 # ngad-canonical-dataloader
 
 独立的 canonical Loading / Sample Construction package。它从 canonical 数据集读取样本，
-以真实 RGB frame 为 anchor，输出统一的六视角 video、absolute State TCP128、
-anchor-relative Action TCP128、时间坐标、validity mask 和 metadata。
+以真实 RGB frame 为 anchor，输出统一的六视角 video、时间坐标、validity mask 和
+metadata；提供 global normalization 时额外输出 absolute State TCP128 与 anchor-relative
+Action TCP128。
 
 本仓库只负责 `Dataset.__init__()` 与 `Dataset.__getitem__()`。PyTorch `DataLoader`、
 GPU transfer、Tokenizer、VAE、flow construction 和模型不在本仓库范围内。完整架构和边界见
@@ -56,6 +57,10 @@ action : [81,2,128]
 
 完整模板见 [configs/canonical.yaml](configs/canonical.yaml)。
 
+`normalization_stats_path` 是必填全局字段。非空路径进入 canonical mode；设为 `null` 时
+进入临时的 video-only mode，只加载真实 video/mask/prompt/frame metadata，不读取统计量，
+也不生成 state/action、dummy stats 或伪造 TCP128。
+
 ### 2. 构造 Dataset
 
 ```python
@@ -80,10 +85,10 @@ frame = sample["video"][position]                       # [6,3,256,256]
 frame_timestamp = sample["frame_timestamps"][position] # scalar float64
 source_index = sample["source_frame_indices"][position]
 
-state = sample["state"][position]                      # [K,128], absolute TCP
-action = sample["action"][position]                    # [K,128], relative TCP
-action_timestamp = sample["action_timestamps"][position]  # [K]
-action_valid = sample["action_valid"][position]        # [K]
+state = sample["state"][position]                      # canonical mode only
+action = sample["action"][position]                    # canonical mode only
+action_timestamp = sample["action_timestamps"][position]
+action_valid = sample["action_valid"][position]
 
 valid_state = state[action_valid]
 valid_action = action[action_valid]
@@ -97,8 +102,8 @@ anchor = sample["frame_offsets"] == 0
 future = sample["frame_offsets"] > 0
 ```
 
-Loading ABI 始终保留 `state[N,K,128]` 和 `action[N,K,128]`。如果模型需要
-`[N*K,128]`，由模型适配层 reshape。
+Canonical mode 保留 `state[N,K,128]` 和 `action[N,K,128]`；如果模型需要
+`[N*K,128]`，由模型适配层 reshape。Video-only mode 不返回这两个字段。
 
 ## 输入 ABI 简述
 
@@ -189,6 +194,8 @@ anchor-relative canonical global stats。
 
 设 `N = len(frame_offsets)`、`K = action_steps_per_rgb_frame`：
 
+两种模式都返回：
+
 ```python
 {
     "video":                 float32[N, 6, 3, 256, 256],
@@ -196,7 +203,17 @@ anchor-relative canonical global stats。
     "source_frame_indices":  int64[N],
     "frame_timestamps":      float64[N],
     "frame_valid":           bool[N],
+    "camera_mask":           bool[N, 6],
+    "image_pixel_mask":      bool[N, 6, 256, 256],
+    "prompt":                str,
+    "data_info":             dict,  # sample_mode="canonical" | "video_only"
+}
+```
 
+Canonical mode 另外返回：
+
+```python
+{
     "state":                 float32[N, K, 128],  # absolute TCP
     "action":                float32[N, K, 128],  # fixed-anchor relative TCP
     "action_step_offsets":   int64[N, K],
@@ -205,13 +222,11 @@ anchor-relative canonical global stats。
 
     "state_feature_mask":    bool[128],
     "action_feature_mask":   bool[128],
-    "camera_mask":           bool[N, 6],
-    "image_pixel_mask":      bool[N, 6, 256, 256],
-
-    "prompt":                str,
-    "data_info":             dict,
 }
 ```
+
+Video-only mode 不返回 state/action、feature/element mask、Action offsets/timestamps 或
+`action_valid`。
 
 State 和 Action 共享时间点、timestamps 和 validity。两者均使用左臂 `0:10`、右臂
 `10:20`、保留/屏蔽 `20:128` 的 TCP128D 布局；State 保留 absolute pose，Action 的

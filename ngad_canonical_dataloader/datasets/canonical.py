@@ -212,7 +212,7 @@ class NGADCanonicalDataset(Dataset):
     def __init__(
         self,
         dataset_dirs: list[dict[str, Any]],
-        normalization_stats_path: str,
+        normalization_stats_path: str | None,
         rgb_rate_hz: float,
         action_steps_per_rgb_frame: int,
         anchor_offset: int,
@@ -224,12 +224,12 @@ class NGADCanonicalDataset(Dataset):
     ) -> None:
         if not dataset_dirs:
             raise ValueError("NGADCanonicalDataset requires at least one named dataset root.")
-        if (
+        if normalization_stats_path is not None and (
             not isinstance(normalization_stats_path, str)
             or not normalization_stats_path.strip()
         ):
             raise ValueError(
-                "NGADCanonicalDataset requires one global normalization stats path."
+                "normalization_stats_path must be a non-empty string or None."
             )
         if (
             rgb_rate_hz is None
@@ -288,18 +288,22 @@ class NGADCanonicalDataset(Dataset):
         )
         self.timeline_layout: TimelineLayout = timeline_layout
         self.resolution = CANONICAL_IMAGE_SIZE
+        self.video_only = normalization_stats_path is None
 
         self._root_meta: list[dict[str, Any]] = []
         self._episodes: list[dict[str, Any]] = []
         self._episode_window_ends: list[int] = []
         total_windows = 0
-        normalization_path = Path(
-            os.path.expanduser(normalization_stats_path)
-        ).resolve()
-        self._normalization_stats = _read_json_object(normalization_path)
-        self._tcp_transform = self._normalization_transform(
-            self._normalization_stats
-        )
+        self._normalization_stats: dict[str, Any] | None = None
+        self._tcp_transform: CanonicalTCPTransform | None = None
+        if normalization_stats_path is not None:
+            normalization_path = Path(
+                os.path.expanduser(normalization_stats_path)
+            ).resolve()
+            self._normalization_stats = _read_json_object(normalization_path)
+            self._tcp_transform = self._normalization_transform(
+                self._normalization_stats
+            )
         mask_contracts: dict[str, dict[str, Any]] = {}
         for configured in configured_roots:
             mask_contract = self._load_mask_and_mapping_contract(
@@ -704,8 +708,10 @@ class NGADCanonicalDataset(Dataset):
     def __len__(self) -> int:
         return self._length
 
-    def normalization_stats(self) -> dict[str, Any]:
+    def normalization_stats(self) -> dict[str, Any] | None:
         """Return the exact canonical statistics serialized with a checkpoint."""
+        if self._normalization_stats is None:
+            return None
         return dict(self._normalization_stats)
 
     def denormalize_action(
@@ -713,6 +719,8 @@ class NGADCanonicalDataset(Dataset):
         action: torch.Tensor,
     ) -> torch.Tensor:
         """Denormalize with the global mixed-training statistics."""
+        if self._tcp_transform is None:
+            raise RuntimeError("Action denormalization is unavailable in video-only mode.")
         return self._tcp_transform.denormalize_action(action)
 
     def _locate_window(self, index: int) -> tuple[dict[str, Any], int]:
@@ -761,6 +769,96 @@ class NGADCanonicalDataset(Dataset):
             dtype=torch.float32,
         )
 
+    def _build_video_sample(
+        self,
+        episode: dict[str, Any],
+        anchor_rgb_index: int,
+        timeline: Any,
+        meta: dict[str, Any],
+        source_frame_indices: torch.Tensor,
+        rows: dict[int, dict[str, Any]],
+        current_row: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Assemble the shared six-camera and frame-metadata sample fields."""
+        source_fps = meta["source_fps"]
+        all_cameras = [
+            (
+                self._prepare_video(
+                    meta["image_backend"].read_camera(
+                        rows,
+                        episode,
+                        camera,
+                        source_frame_indices,
+                        source_fps,
+                    )
+                )
+                if available
+                else self._blank_video(source_frame_indices.numel())
+            )
+            for camera, available in zip(
+                self.camera_keys, meta["camera_mask"].tolist()
+            )
+        ]
+        camera_mask = meta["camera_mask"].clone()
+        camera_tensor = torch.stack(all_cameras, dim=0)
+        camera_tensor = torch.where(
+            timeline.frame_valid[None, :, None, None, None],
+            camera_tensor,
+            torch.full_like(camera_tensor, -1.0),
+        )
+        video = camera_tensor.permute(1, 0, 2, 3, 4).contiguous()
+        base_pixel_mask = meta["pixel_mask"][None].expand(
+            len(self.camera_keys), -1, -1
+        ) & camera_mask[:, None, None]
+        image_pixel_mask = base_pixel_mask[None].expand(
+            video.shape[0], -1, -1, -1
+        ) & timeline.frame_valid[:, None, None, None]
+        sample_camera_mask = camera_mask[None].expand(
+            video.shape[0], -1
+        ) & timeline.frame_valid[:, None]
+
+        task_index = int(current_row["task_index"])
+        task = meta["tasks"][task_index]
+        episode_timestamp_start = torch.as_tensor(
+            rows[0]["timestamp"], dtype=torch.float64
+        ).reshape(())
+        anchor_timestamp = (
+            episode_timestamp_start + anchor_rgb_index / self.rgb_rate_hz
+        )
+        frame_timestamps = (
+            anchor_timestamp
+            + self.timeline_layout.frame_offsets.to(torch.float64)
+            / self.rgb_rate_hz
+        )
+        return {
+            "video": video,
+            "frame_offsets": self.timeline_layout.frame_offsets,
+            "source_frame_indices": source_frame_indices,
+            "frame_timestamps": frame_timestamps,
+            "frame_valid": timeline.frame_valid,
+            "camera_mask": sample_camera_mask,
+            "image_pixel_mask": image_pixel_mask,
+            "prompt": DEFAULT_PROMPT.format(task=task),
+            "data_info": {
+                "sample_mode": "video_only" if self.video_only else "canonical",
+                "img_hw": torch.tensor(
+                    [video.shape[-2], video.shape[-1]], dtype=torch.float32
+                ),
+                "aspect_ratio": torch.tensor(
+                    video.shape[-1] / video.shape[-2], dtype=torch.float32
+                ),
+                "root_index": episode["root_index"],
+                "episode_index": episode["episode_index"],
+                "task_index": task_index,
+                "source_fps": source_fps,
+                "rgb_rate_hz": self.rgb_rate_hz,
+                "action_steps_per_rgb_frame": self.action_steps_per_rgb_frame,
+                "action_rate_hz": self.action_rate_hz,
+                "anchor_timestamp": anchor_timestamp,
+                "anchor_rgb_index": anchor_rgb_index,
+            },
+        }
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         episode, anchor_rgb_index = self._locate_window(index)
         timeline = timeline_sample_indices(
@@ -781,22 +879,27 @@ class NGADCanonicalDataset(Dataset):
             source_fps,
             self.rgb_rate_hz,
         )
-        anchor_action_index = torch.tensor(
-            [anchor_rgb_index * self.action_steps_per_rgb_frame],
-            dtype=torch.long,
-        )
-        state_target_indices = torch.cat(
-            [anchor_action_index, timeline.action_indices.reshape(-1)]
-        )
-        state_lower, state_upper, state_fraction = self._state_interpolation_indices(
-            state_target_indices,
-            source_fps,
-            self.action_rate_hz,
-            episode["length"],
-        )
-        requested = torch.unique(
-            torch.cat([source_frame_indices, state_lower, state_upper]), sorted=True
-        )
+        if self.video_only:
+            requested = torch.unique(
+                torch.cat([source_frame_indices, anchor_source_index]), sorted=True
+            )
+        else:
+            anchor_action_index = torch.tensor(
+                [anchor_rgb_index * self.action_steps_per_rgb_frame],
+                dtype=torch.long,
+            )
+            state_target_indices = torch.cat(
+                [anchor_action_index, timeline.action_indices.reshape(-1)]
+            )
+            state_lower, state_upper, state_fraction = self._state_interpolation_indices(
+                state_target_indices,
+                source_fps,
+                self.action_rate_hz,
+                episode["length"],
+            )
+            requested = torch.unique(
+                torch.cat([source_frame_indices, state_lower, state_upper]), sorted=True
+            )
         rows = meta["table_backend"].read_rows(
             episode,
             requested,
@@ -815,6 +918,19 @@ class NGADCanonicalDataset(Dataset):
             source_timestamps,
             torch.as_tensor(rows[0]["timestamp"], dtype=torch.float64).reshape(()),
         )
+        current_row = rows[int(anchor_source_index.item())]
+        sample = self._build_video_sample(
+            episode,
+            anchor_rgb_index,
+            timeline,
+            meta,
+            source_frame_indices,
+            rows,
+            current_row,
+        )
+        if self.video_only:
+            return sample
+
         lower_state = self._reshape_state_window(torch.tensor(
             [rows[int(frame)][CANONICAL_STATE_KEY] for frame in state_lower.tolist()],
             dtype=torch.float32,
@@ -823,7 +939,6 @@ class NGADCanonicalDataset(Dataset):
             [rows[int(frame)][CANONICAL_STATE_KEY] for frame in state_upper.tolist()],
             dtype=torch.float32,
         ))
-        current_row = rows[int(anchor_source_index.item())]
         tactile_values = (
             torch.as_tensor(current_row[CANONICAL_TACTILE_VALUES_KEY], dtype=torch.float32)
             if meta["tactile_mask"][0]
@@ -834,32 +949,15 @@ class NGADCanonicalDataset(Dataset):
             if meta["tactile_mask"][1]
             else torch.zeros((4, 3), dtype=torch.float32)
         )
-        all_cameras = [
-            (
-                self._prepare_video(
-                    meta["image_backend"].read_camera(
-                        rows,
-                        episode,
-                        camera,
-                        source_frame_indices,
-                        source_fps,
-                    )
-                )
-                if available
-                else self._blank_video(source_frame_indices.numel())
-            )
-            for camera, available in zip(self.camera_keys, meta["camera_mask"].tolist())
-        ]
-        task_index = int(current_row["task_index"])
-
         absolute_state_grid = interpolate_canonical_tcp(
             lower_state, upper_state, state_fraction
         )
         state_element_mask = meta["state_element_mask"].clone()
         action_element_mask = meta["action_element_mask"].clone()
-        camera_mask = meta["camera_mask"].clone()
         tactile_mask = meta["tactile_mask"].clone()
         tcp_transform = self._tcp_transform
+        if tcp_transform is None:
+            raise RuntimeError("Canonical sample construction requires global stats.")
         # Both outputs reuse this absolute interpolation grid; only Action is
         # converted into the fixed-anchor frame before normalization.
         action, action_feature_mask = tcp_transform.encode_action_targets(
@@ -887,47 +985,12 @@ class NGADCanonicalDataset(Dataset):
             state.dtype
         )
 
-        camera_tensor = torch.stack(all_cameras, dim=0)
-        camera_tensor = torch.where(
-            timeline.frame_valid[None, :, None, None, None],
-            camera_tensor,
-            torch.full_like(camera_tensor, -1.0),
-        )
-        # Time is the leading sample axis; six canonical cameras remain explicit.
-        video = camera_tensor.permute(1, 0, 2, 3, 4).contiguous()
-
-        base_pixel_mask = meta["pixel_mask"][None].expand(
-            len(self.camera_keys), -1, -1
-        ) & camera_mask[:, None, None]
-        image_pixel_mask = base_pixel_mask[None].expand(
-            video.shape[0], -1, -1, -1
-        ) & timeline.frame_valid[:, None, None, None]
-        sample_camera_mask = camera_mask[None].expand(
-            video.shape[0], -1
-        ) & timeline.frame_valid[:, None]
-        task = meta["tasks"][task_index]
-        episode_timestamp_start = torch.as_tensor(
-            rows[0]["timestamp"], dtype=torch.float64
-        ).reshape(())
-        anchor_timestamp = (
-            episode_timestamp_start + anchor_rgb_index / self.rgb_rate_hz
-        )
-        frame_timestamps = (
-            anchor_timestamp
-            + self.timeline_layout.frame_offsets.to(torch.float64)
-            / self.rgb_rate_hz
-        )
         action_timestamps = (
-            anchor_timestamp
+            sample["data_info"]["anchor_timestamp"]
             + self.timeline_layout.action_step_offsets.to(torch.float64)
             / self.action_rate_hz
         )
-        return {
-            "video": video,
-            "frame_offsets": self.timeline_layout.frame_offsets,
-            "source_frame_indices": source_frame_indices,
-            "frame_timestamps": frame_timestamps,
-            "frame_valid": timeline.frame_valid,
+        sample.update({
             "state": state,
             "action": action,
             "action_step_offsets": self.timeline_layout.action_step_offsets,
@@ -940,20 +1003,5 @@ class NGADCanonicalDataset(Dataset):
             CANONICAL_TACTILE_VALUES_KEY: tactile_values,
             CANONICAL_TACTILE_DT_KEY: tactile_dt,
             "tactile_field_mask": tactile_mask,
-            "camera_mask": sample_camera_mask,
-            "image_pixel_mask": image_pixel_mask,
-            "prompt": DEFAULT_PROMPT.format(task=task),
-            "data_info": {
-                "img_hw": torch.tensor([video.shape[-2], video.shape[-1]], dtype=torch.float32),
-                "aspect_ratio": torch.tensor(video.shape[-1] / video.shape[-2], dtype=torch.float32),
-                "root_index": episode["root_index"],
-                "episode_index": episode["episode_index"],
-                "task_index": task_index,
-                "source_fps": source_fps,
-                "rgb_rate_hz": self.rgb_rate_hz,
-                "action_steps_per_rgb_frame": self.action_steps_per_rgb_frame,
-                "action_rate_hz": self.action_rate_hz,
-                "anchor_timestamp": anchor_timestamp,
-                "anchor_rgb_index": anchor_rgb_index,
-            },
-        }
+        })
+        return sample

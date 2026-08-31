@@ -92,3 +92,29 @@ def test_global_normalization_is_required_and_forwarded() -> None:
         "path",
         "mask_and_mapping_path",
     }
+
+
+def test_null_global_normalization_round_trips_as_video_only(tmp_path) -> None:
+    path = tmp_path / "video-only.yaml"
+    path.write_text(
+        """schema_version: ngad_canonical_dataloader_v2
+dataset:
+  normalization_stats_path: null
+  dataset_dirs:
+    - name: hy_table_000
+      path: /data/table_000
+      mask_and_mapping_path: /data/mask.json
+  timeline:
+    rgb_rate_hz: 10
+    action_steps_per_rgb_frame: 2
+    anchor_offset: 0
+    frame_ranges:
+      - [0, 0]
+""",
+        encoding="utf-8",
+    )
+
+    config = load_dataset_config(path)
+
+    assert config.normalization_stats_path is None
+    assert config.to_dataset_kwargs()["normalization_stats_path"] is None

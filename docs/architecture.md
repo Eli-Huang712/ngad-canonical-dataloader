@@ -54,13 +54,13 @@ Dataset.__init__()
   ▼
 Dataset.__getitem__()
 global index → table/episode/anchor → 解析 RGB/State/Action 时间点
-→ table/image backend 按需读取 → absolute TCP 插值
-→ absolute State + anchor-relative Action → normalization → TCP128
-→ 组合 temporal/camera/pixel/feature mask 与 metadata
+→ table/image backend 按需读取 → 组合 video/camera/pixel/frame metadata
+→ canonical mode 才执行 absolute TCP 插值、relative Action、normalization 与 TCP128
   │
   ▼
-单样本 canonical ABI
-video + state + action + masks + timestamps + prompt + data_info
+单样本 ABI
+video-only: video + camera/pixel/frame mask + prompt + data_info
+canonical: 上述字段 + state + action + action/feature/element mask
 ```
 
 `Dataset.__init__()` 只建立 metadata、Episode 和 anchor 的索引视图，不预加载全部视频。
@@ -81,12 +81,12 @@ video + state + action + masks + timestamps + prompt + data_info
 与 source index，并只读取当前 sample 需要的数据行和图像。它完成：
 
 - global index → physical table / Episode / anchor；
-- 生成 RGB/Action target index 和 Episode validity；
+- 生成 RGB target index 和 Episode validity；
 - 将 RGB target 映射到真实 source frame；
-- 为高频 absolute TCP state 生成插值 bracket；
 - 调用 table/image backend 读取并解码数据；
-- 构造 absolute State、fixed-anchor relative Action、normalization 和 TCP128；
-- 组合 temporal、camera、pixel、element 和 feature mask；
+- 组合 frame、camera、pixel mask、prompt 和 metadata；
+- 仅在 canonical mode 为高频 state 生成插值 bracket，并构造 absolute State、
+  fixed-anchor relative Action、normalization、TCP128 和对应 mask；
 - 返回稳定的单样本 ABI。
 
 ## 3. 文件职责

@@ -544,8 +544,53 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
         torch.tensor([[-0.15, -0.10], [-0.05, 0.0], [0.05, 0.10]]),
     )
     assert sample["data_info"]["action_rate_hz"] == 20
+    assert sample["data_info"]["sample_mode"] == "canonical"
     assert "normalization_id" not in sample["data_info"]
     assert stats_reads == 1
     assert dataset.normalization_stats() == json.loads(stats_path.read_text())
     with pytest.raises(TypeError):
         dataset.denormalize_action(torch.zeros(128), "synthetic")
+
+    def fail_normalization_transform(_stats):
+        raise AssertionError("video-only mode must not construct a TCP transform")
+
+    monkeypatch.setattr(
+        NGADCanonicalDataset,
+        "_normalization_transform",
+        staticmethod(fail_normalization_transform),
+    )
+    video_dataset = NGADCanonicalDataset(
+        dataset_dirs=[
+            {
+                "name": "synthetic",
+                "path": str(root),
+                "mask_and_mapping_path": str(mask_and_mapping_path),
+            }
+        ],
+        normalization_stats_path=None,
+        rgb_rate_hz=10,
+        action_steps_per_rgb_frame=2,
+        anchor_offset=0,
+        frame_ranges=((-1, 1),),
+    )
+    video_sample = video_dataset[2]
+
+    assert set(video_sample) == {
+        "video",
+        "frame_offsets",
+        "source_frame_indices",
+        "frame_timestamps",
+        "frame_valid",
+        "camera_mask",
+        "image_pixel_mask",
+        "prompt",
+        "data_info",
+    }
+    assert video_sample["video"].shape == (3, 6, 3, 256, 256)
+    assert video_sample["camera_mask"].shape == (3, 6)
+    assert video_sample["image_pixel_mask"].shape == (3, 6, 256, 256)
+    assert video_sample["data_info"]["sample_mode"] == "video_only"
+    assert video_dataset.normalization_stats() is None
+    assert stats_reads == 1
+    with pytest.raises(RuntimeError, match="video-only mode"):
+        video_dataset.denormalize_action(torch.zeros(128))
