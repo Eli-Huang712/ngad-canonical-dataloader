@@ -17,16 +17,16 @@ GPU transfer、Tokenizer、VAE、flow construction 和模型不在本仓库范�
 schema_version: ngad_canonical_dataloader_v2
 
 dataset:
+  normalization_stats_path: /path/to/stats/canonical_global_normalization.json
+
   dataset_dirs:
     - name: libero
       path: /path/to/canonical/libero
       mask_and_mapping_path: /path/to/canonical/libero/mask_and_mapping.json
-      normalization_stats_path: /path/to/stats/libero.json
 
     - name: hy_embodied
       path: /path/to/canonical/hy_embodied
       mask_and_mapping_path: /path/to/canonical/hy_embodied/mask_and_mapping.json
-      normalization_stats_path: /path/to/stats/hy_embodied.json
 
   timeline:
     rgb_rate_hz: 10
@@ -177,10 +177,10 @@ fragment、shard、`.work` 或 `.publishing` 等旧拓扑。
 | identity fields | scalar | `timestamp/frame_index/episode_index/index/task_index` |
 
 每臂 TCP10 为 XYZ `[3]`、row-major Rot6D `[6]`、absolute gripper openness `[1]`。
-每个 `dataset_dirs` 条目必须提供 `mask_and_mapping_path` 和离线生成的
-`normalization_stats_path`。前者同时定义 canonical 字段有效性和
-`canonical key -> physical storage key` 映射；Dataset 不在训练时统计、猜测缺失字段或
-兼容旧 `mask_path`。
+每个 `dataset_dirs` 条目只提供 `name`、`path` 和 `mask_and_mapping_path`。一次混合训练在
+`dataset.normalization_stats_path` 提供唯一的 global normalization；所有 physical table
+共用它。Dataset 不在训练时统计，也不接受各 table 的 `meta/stats.json` 代替正式的
+anchor-relative canonical global stats。
 
 物理目录拓扑、mask JSON、时间轴、插值、relative pose、normalization 和 TCP128D 规划见
 [Canonical Data Contract](docs/data-contract.md)。

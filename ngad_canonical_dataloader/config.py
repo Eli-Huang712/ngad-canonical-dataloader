@@ -50,12 +50,11 @@ class TimelineConfig:
 
 @dataclass(frozen=True)
 class DatasetRootConfig:
-    """One named root with its field contract and normalization statistics."""
+    """One named root with its canonical field contract."""
 
     name: str
     path: str
     mask_and_mapping_path: str
-    normalization_stats_path: str
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "DatasetRootConfig":
@@ -63,7 +62,6 @@ class DatasetRootConfig:
             "name",
             "path",
             "mask_and_mapping_path",
-            "normalization_stats_path",
         }
         if set(value) != expected:
             raise ValueError(f"Each dataset root must contain exactly {sorted(expected)}.")
@@ -71,7 +69,6 @@ class DatasetRootConfig:
             name=str(value["name"]),
             path=str(value["path"]),
             mask_and_mapping_path=str(value["mask_and_mapping_path"]),
-            normalization_stats_path=str(value["normalization_stats_path"]),
         )
 
     def to_dataset_entry(self) -> dict[str, str]:
@@ -79,7 +76,6 @@ class DatasetRootConfig:
             "name": self.name,
             "path": self.path,
             "mask_and_mapping_path": self.mask_and_mapping_path,
-            "normalization_stats_path": self.normalization_stats_path,
         }
 
 
@@ -87,6 +83,7 @@ class DatasetRootConfig:
 class DatasetConfig:
     """All arguments required to construct :class:`NGADCanonicalDataset`."""
 
+    normalization_stats_path: str
     dataset_dirs: tuple[DatasetRootConfig, ...]
     timeline: TimelineConfig
     max_samples: int | None = None
@@ -97,6 +94,7 @@ class DatasetConfig:
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "DatasetConfig":
         allowed = {
+            "normalization_stats_path",
             "dataset_dirs",
             "timeline",
             "max_samples",
@@ -107,15 +105,24 @@ class DatasetConfig:
         unknown = set(value).difference(allowed)
         if unknown:
             raise ValueError(f"Unknown dataset configuration fields: {sorted(unknown)}.")
-        required = {"dataset_dirs", "timeline"}
+        required = {"normalization_stats_path", "dataset_dirs", "timeline"}
         missing = required.difference(value)
         if missing:
             raise ValueError(f"Missing dataset configuration fields: {sorted(missing)}.")
         roots_value = value["dataset_dirs"]
         if not isinstance(roots_value, list) or not roots_value:
             raise ValueError("dataset_dirs must be a non-empty list.")
+        normalization_stats_path = value["normalization_stats_path"]
+        if (
+            not isinstance(normalization_stats_path, str)
+            or not normalization_stats_path.strip()
+        ):
+            raise ValueError(
+                "dataset.normalization_stats_path must be a non-empty string."
+            )
         roots = tuple(DatasetRootConfig.from_mapping(root) for root in roots_value)
         return cls(
+            normalization_stats_path=normalization_stats_path,
             dataset_dirs=roots,
             timeline=TimelineConfig.from_mapping(value["timeline"]),
             max_samples=(
@@ -128,6 +135,7 @@ class DatasetConfig:
 
     def to_dataset_kwargs(self) -> dict[str, Any]:
         return {
+            "normalization_stats_path": self.normalization_stats_path,
             "dataset_dirs": [root.to_dataset_entry() for root in self.dataset_dirs],
             "rgb_rate_hz": self.timeline.rgb_rate_hz,
             "action_steps_per_rgb_frame": self.timeline.action_steps_per_rgb_frame,

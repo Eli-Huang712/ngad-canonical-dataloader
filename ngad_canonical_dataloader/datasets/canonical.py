@@ -212,6 +212,7 @@ class NGADCanonicalDataset(Dataset):
     def __init__(
         self,
         dataset_dirs: list[dict[str, Any]],
+        normalization_stats_path: str,
         rgb_rate_hz: float,
         action_steps_per_rgb_frame: int,
         anchor_offset: int,
@@ -223,6 +224,13 @@ class NGADCanonicalDataset(Dataset):
     ) -> None:
         if not dataset_dirs:
             raise ValueError("NGADCanonicalDataset requires at least one named dataset root.")
+        if (
+            not isinstance(normalization_stats_path, str)
+            or not normalization_stats_path.strip()
+        ):
+            raise ValueError(
+                "NGADCanonicalDataset requires one global normalization stats path."
+            )
         if (
             rgb_rate_hz is None
             or not np.isfinite(float(rgb_rate_hz))
@@ -245,11 +253,10 @@ class NGADCanonicalDataset(Dataset):
                 "name",
                 "path",
                 "mask_and_mapping_path",
-                "normalization_stats_path",
             }:
                 raise TypeError(
                     "Each dataset_dirs entry must contain exactly name, path, "
-                    "mask_and_mapping_path, and normalization_stats_path."
+                    "and mask_and_mapping_path."
                 )
             name = str(entry["name"]).strip()
             if not name or name in dataset_names:
@@ -261,9 +268,6 @@ class NGADCanonicalDataset(Dataset):
                     "path": Path(os.path.expanduser(str(entry["path"]))).resolve(),
                     "mask_and_mapping_path": Path(
                         os.path.expanduser(str(entry["mask_and_mapping_path"]))
-                    ).resolve(),
-                    "normalization_stats_path": Path(
-                        os.path.expanduser(str(entry["normalization_stats_path"]))
                     ).resolve(),
                 }
             )
@@ -289,14 +293,15 @@ class NGADCanonicalDataset(Dataset):
         self._episodes: list[dict[str, Any]] = []
         self._episode_window_ends: list[int] = []
         total_windows = 0
-        transforms: dict[str, CanonicalTCPTransform] = {}
-        normalization_stats: dict[str, dict[str, Any]] = {}
+        normalization_path = Path(
+            os.path.expanduser(normalization_stats_path)
+        ).resolve()
+        self._normalization_stats = _read_json_object(normalization_path)
+        self._tcp_transform = self._normalization_transform(
+            self._normalization_stats
+        )
         mask_contracts: dict[str, dict[str, Any]] = {}
         for configured in configured_roots:
-            stats = _read_json_object(configured["normalization_stats_path"])
-            transform = self._normalization_transform(stats)
-            transforms[configured["name"]] = transform
-            normalization_stats[configured["name"]] = stats
             mask_contract = self._load_mask_and_mapping_contract(
                 configured["mask_and_mapping_path"], configured["name"]
             )
@@ -374,8 +379,6 @@ class NGADCanonicalDataset(Dataset):
                     "image_backend": image_backend,
                     "tasks": tasks,
                     "source_fps": source_fps,
-                    "normalization_id": configured["name"],
-                    "tcp_transform": transforms[configured["name"]],
                     "field_mask": mask_contract["field_mask"],
                     "field_mapping": mask_contract["field_mapping"],
                     "state_element_mask": mask_contract["state_element_mask"],
@@ -410,12 +413,6 @@ class NGADCanonicalDataset(Dataset):
         if max_samples is not None and int(max_samples) <= 0:
             raise ValueError("max_samples must be positive when provided.")
         self._length = min(total_windows, int(max_samples)) if max_samples is not None else total_windows
-
-        self._normalization_stats = {
-            "schema_version": "ngad_canonical_normalization_map_v1",
-            "datasets": normalization_stats,
-        }
-        self._tcp_transforms = transforms
 
     def _load_mask_and_mapping_contract(
         self,
@@ -714,10 +711,9 @@ class NGADCanonicalDataset(Dataset):
     def denormalize_action(
         self,
         action: torch.Tensor,
-        normalization_id: str,
     ) -> torch.Tensor:
-        """Denormalize with the explicitly selected dataset statistics."""
-        return self._tcp_transforms[normalization_id].denormalize_action(action)
+        """Denormalize with the global mixed-training statistics."""
+        return self._tcp_transform.denormalize_action(action)
 
     def _locate_window(self, index: int) -> tuple[dict[str, Any], int]:
         if not 0 <= int(index) < self._length:
@@ -863,7 +859,7 @@ class NGADCanonicalDataset(Dataset):
         action_element_mask = meta["action_element_mask"].clone()
         camera_mask = meta["camera_mask"].clone()
         tactile_mask = meta["tactile_mask"].clone()
-        tcp_transform = meta["tcp_transform"]
+        tcp_transform = self._tcp_transform
         # Both outputs reuse this absolute interpolation grid; only Action is
         # converted into the fixed-anchor frame before normalization.
         action, action_feature_mask = tcp_transform.encode_action_targets(
@@ -953,7 +949,6 @@ class NGADCanonicalDataset(Dataset):
                 "root_index": episode["root_index"],
                 "episode_index": episode["episode_index"],
                 "task_index": task_index,
-                "normalization_id": meta["normalization_id"],
                 "source_fps": source_fps,
                 "rgb_rate_hz": self.rgb_rate_hz,
                 "action_steps_per_rgb_frame": self.action_steps_per_rgb_frame,

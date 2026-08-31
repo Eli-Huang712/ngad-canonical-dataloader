@@ -1,11 +1,12 @@
 schema_version: ngad_canonical_dataloader_v2
 
 dataset:
+  normalization_stats_path: /path/to/stats/canonical_global_normalization.json
+
   dataset_dirs:
     - name: libero
       path: /path/to/canonical/libero
       mask_and_mapping_path: /path/to/canonical/libero/mask_and_mapping.json
-      normalization_stats_path: /path/to/stats/libero.json
 
   timeline:
     rgb_rate_hz: 10

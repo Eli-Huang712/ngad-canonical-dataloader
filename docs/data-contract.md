@@ -102,11 +102,14 @@ Parquet/H.264 的可用图像必须声明为 RGB `video[256,256,3]`；物理缺�
 
 ## 3. Field Mapping、Mask 与 Normalization 输入
 
-每个 `dataset_dirs` 条目必须显式提供：
+每个 `dataset_dirs` 条目必须严格只包含 `name`、`path` 和
+`mask_and_mapping_path`。后者同时定义 `field_mapping`、`field_mask`、state/action 的
+`element_mask[20]`，以及共享的 `image_pixel_mask` NPZ 路径和 key。
 
-- `mask_and_mapping_path`：同时定义 `field_mapping`、`field_mask`、state/action 的
-  `element_mask[20]`，以及共享的 `image_pixel_mask` NPZ 路径和 key；
-- `normalization_stats_path`：该数据集已经离线统计完成的 normalization JSON。
+`dataset.normalization_stats_path` 是一次完整混合训练唯一的 global normalization JSON。
+LIBERO、Hy、UMI 和其他 canonical table 共用同一份统计；Dataset 只加载一次并只构造一个
+`CanonicalTCPTransform`。各 table 的原始 `meta/stats.json` 不是正式时间轴上重构的
+anchor-relative Action 统计，禁止直接作为 global normalization 输入。
 
 `mask_and_mapping_path` 指向的 JSON 顶层必须严格为：
 
@@ -264,7 +267,7 @@ gripper_action = absolute_openness_t
 - gripper 不计算 relative difference，继续保留目标时刻的 absolute openness；
 - 左右臂分别使用各自的 anchor，不共享 TCP frame。
 
-### 5.3 Per-dataset Normalization
+### 5.3 Global Normalization
 
 | 特征 | State | Action |
 |---|---|---|
@@ -272,8 +275,8 @@ gripper_action = absolute_openness_t
 | Rot6D | 不做统计归一化 | 不做统计归一化 |
 | gripper openness | clamp 到 `[0,1]` | 保留目标 absolute openness，并 clamp 到 `[0,1]` |
 
-部署侧可以调用 `dataset.denormalize_action(action, normalization_id)`，把 Action TCP128 的
-active relative XYZ 乘回对应 scale；Rot6D 和 openness 保持不变，保留槽位保持为零。
+部署侧可以调用 `dataset.denormalize_action(action)`，使用唯一 global scale 把 Action
+TCP128 的 active relative XYZ 乘回物理尺度；Rot6D 和 openness 保持不变，保留槽位保持为零。
 
 ### 5.4 TCP20 → TCP128D
 
@@ -343,7 +346,6 @@ State/Action time slot。
 | `root_index` | `int` | 当前 physical table 在 Dataset 内的索引 |
 | `episode_index` | `int` | 当前 Episode 标识 |
 | `task_index` | `int` | anchor 行的任务索引 |
-| `normalization_id` | `str` | 选择该 sample normalization stats 的数据集名称 |
 | `source_fps` | `float` | 落盘源数据 FPS |
 | `rgb_rate_hz` | `float` | 输出 RGB rate |
 | `action_steps_per_rgb_frame` | `int` | 帧内 State/Action 子步数 K |

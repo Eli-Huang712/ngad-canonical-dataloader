@@ -49,7 +49,7 @@ config.py
   ▼
 Dataset.__init__()
 枚举 table_NNN → 按唯一物理 payload 选择 backend → 读取 task/episode metadata
-→ 加载 mask/mapping/stats → 建立统一全局 anchor 索引与 TimelineLayout
+→ 加载 per-root mask/mapping 和 global stats → 建立统一全局 anchor 索引与 TimelineLayout
   │
   ▼
 Dataset.__getitem__()
@@ -71,7 +71,8 @@ video + state + action + masks + timestamps + prompt + data_info
   single-table root；两种路径都不递归且没有 `table_name` 配置；
 - 根据 table 中唯一的 Lance 或 Parquet/H.264 payload 选择物理 backend；
 - 读取 task/episode metadata、source FPS、episode offsets 和视频时间范围；
-- 加载每个数据集自己的 mask-and-mapping contract 和 normalization stats；
+- 加载每个数据集自己的 mask-and-mapping contract，并为所有混合数据加载唯一一份
+  global normalization stats；
 - 按 Episode 完成 train/validation split；
 - 根据每个 Episode 的目标 RGB 长度建立全局 anchor 前缀和；
 - 建立固定 `TimelineLayout` 和 offset→position 映射。

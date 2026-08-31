@@ -32,6 +32,7 @@ def test_fixed_canonical_abi_is_not_configurable() -> None:
     with pytest.raises(TypeError, match="target_rgb_fps"):
         NGADCanonicalDataset(
             dataset_dirs=[],
+            normalization_stats_path="/data/global-stats.json",
             rgb_rate_hz=10,
             action_steps_per_rgb_frame=2,
             anchor_offset=0,
@@ -350,6 +351,8 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
     root = tmp_path / "canonical"
     table_root = root / "table_000"
     (table_root / "meta").mkdir(parents=True)
+    second_table_root = root / "table_001"
+    (second_table_root / "meta").mkdir(parents=True)
     features = {
         "observation.state": {"shape": [20]},
         "action": {"shape": [20]},
@@ -374,6 +377,10 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
                 "features": features,
             }
         ),
+        encoding="utf-8",
+    )
+    (second_table_root / "meta" / "info.json").write_text(
+        (table_root / "meta" / "info.json").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
     np.savez(tmp_path / "pixel_mask.npz", mask=np.ones((256, 256), dtype=np.bool_))
@@ -489,15 +496,25 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
             FakeImageBackend(),
         ),
     )
+    original_read_json = canonical_module._read_json_object
+    stats_reads = 0
+
+    def counted_read_json(path):
+        nonlocal stats_reads
+        if path == stats_path.resolve():
+            stats_reads += 1
+        return original_read_json(path)
+
+    monkeypatch.setattr(canonical_module, "_read_json_object", counted_read_json)
     dataset = NGADCanonicalDataset(
         dataset_dirs=[
             {
                 "name": "synthetic",
                 "path": str(root),
                 "mask_and_mapping_path": str(mask_and_mapping_path),
-                "normalization_stats_path": str(stats_path),
             }
         ],
+        normalization_stats_path=str(stats_path),
         rgb_rate_hz=10,
         action_steps_per_rgb_frame=2,
         anchor_offset=0,
@@ -527,3 +544,8 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
         torch.tensor([[-0.15, -0.10], [-0.05, 0.0], [0.05, 0.10]]),
     )
     assert sample["data_info"]["action_rate_hz"] == 20
+    assert "normalization_id" not in sample["data_info"]
+    assert stats_reads == 1
+    assert dataset.normalization_stats() == json.loads(stats_path.read_text())
+    with pytest.raises(TypeError):
+        dataset.denormalize_action(torch.zeros(128), "synthetic")
