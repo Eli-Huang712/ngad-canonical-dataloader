@@ -8,25 +8,29 @@ from ngad_canonical_dataloader.backends.table import LanceTableBackend, ParquetT
 
 
 HY_CANONICAL_SCHEMA = "ngad_hy_canonical_lance_v2"
-LANCE_JPEG_BACKEND = "lance_jpeg"
-PARQUET_H264_BACKEND = "parquet_h264"
 
 
 def create_storage_backends(
     table_root: Path,
     table_name: str,
-    table_from_index: int,
     info: dict[str, Any],
 ) -> tuple[LanceTableBackend | ParquetTableBackend, JpegImageBackend | H264ImageBackend]:
-    """Build the backend pair explicitly declared by one canonical table."""
-    storage_backend = info.get("storage_backend")
-    if storage_backend == LANCE_JPEG_BACKEND:
+    """Build the one backend pair physically published by a canonical table."""
+    lance_root = table_root / f"{table_name}.lance"
+    has_lance = lance_root.is_dir()
+    has_parquet_h264 = (table_root / "data").is_dir() and (
+        table_root / "videos"
+    ).is_dir()
+    if has_lance == has_parquet_h264:
+        raise ValueError(
+            f"{table_root} must contain exactly one Lance/JPEG or Parquet/H.264 payload."
+        )
+    if has_lance:
         if info.get("canonical_schema") != HY_CANONICAL_SCHEMA:
             raise ValueError(
                 f"{table_root} Lance table must declare "
                 f"canonical_schema={HY_CANONICAL_SCHEMA!r}."
             )
-        lance_root = table_root / f"{table_name}.lance"
         if (table_root / "data").exists() or (table_root / "videos").exists():
             raise ValueError(
                 f"{table_root} cannot contain Parquet/H.264 payload beside Lance."
@@ -40,10 +44,10 @@ def create_storage_backends(
                 f"{table_root} must contain a published {table_name}.lance dataset."
             )
         return (
-            LanceTableBackend(table_root, lance_root, table_from_index),
+            LanceTableBackend(table_root, lance_root),
             JpegImageBackend(),
         )
-    if storage_backend == PARQUET_H264_BACKEND:
+    if has_parquet_h264:
         if (table_root / f"{table_name}.lance").exists():
             raise ValueError(
                 f"{table_root} cannot contain Lance payload beside Parquet/H.264."
@@ -76,10 +80,7 @@ def create_storage_backends(
             ParquetTableBackend(table_root, info),
             H264ImageBackend(table_root, info),
         )
-    raise ValueError(
-        f"{table_root} storage_backend must be "
-        f"{LANCE_JPEG_BACKEND!r} or {PARQUET_H264_BACKEND!r}."
-    )
+    raise AssertionError("Unreachable canonical storage backend state.")
 
 
 __all__ = ["create_storage_backends"]

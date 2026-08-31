@@ -109,16 +109,16 @@ Loading ABI 始终保留 `state[N,K,128]` 和 `action[N,K,128]`。如果模型�
 
 ### 期望的数据集文件拓扑
 
-Loader 只接受下面这一种 dataset-root 拓扑。`tables.parquet` 是唯一 table 清单；每个
-`table_xxx` 只能选择 Lance 或 Parquet 其中一种 payload，不允许同时存在两种 backend。
+Loader 只接受下面这一种 dataset-root 拓扑。根目录的直接子目录 `table_NNN` 就是已发布
+table 清单；每个 `table_NNN` 只能选择 Lance 或 Parquet 其中一种 payload，不允许同时
+存在两种 backend。
 
 ```text
 <dataset-root>/
-├── tables.parquet
-│
 ├── table_000/
 │   ├── meta/
 │   │   ├── info.json
+│   │   ├── stats.json
 │   │   ├── tasks.parquet
 │   │   └── episodes/
 │   │       └── *.parquet
@@ -144,23 +144,14 @@ Loader 只接受下面这一种 dataset-root 拓扑。`tables.parquet` 是唯一
 └── ...
 ```
 
-`tables.parquet` 必须严格包含：
+Loader 按目录名中的数字排序，例如 `table_000`、`table_001`。每张 table 的
+`meta/info.json` 必须声明 `total_episodes` 和 `total_frames`；Episode metadata 中的
+`dataset_from_index`、`dataset_to_index` 以及数据行 `index` 都是 table-local。Dataset
+再把所有 table 的合法窗口串成一个对外的全局 `__len__` / `__getitem__` 索引空间。
 
-```text
-table_index:   int64
-table_name:    string
-relative_path: string
-num_episodes:  int64
-num_frames:    int64
-```
-
-Loader 按 `table_index` 排序并对 `num_frames` 做前缀和，得到每张 table 的
-dataset-global `[dataset_from_index,dataset_to_index)`。每个 table 的 Episode offsets
-以及数据行 `index` 必须落在该全局区间；Lance 读取时才转换为 table-local physical offset。
-
-每张 table 的 `meta/info.json.storage_backend` 必须显式为 `lance_jpeg` 或
-`parquet_h264`。Loader 不扫描 single root、`fragments/*`、`shard_*`、`.work` 或
-`.publishing`，也不从目录内容猜测 backend。
+backend 由每张 table 实际发布的唯一 payload 确定：`<table-name>.lance/` 表示 Lance +
+inline JPEG，`data/` 与 `videos/` 表示 Parquet + H.264。Loader 不接受根级 manifest、
+single root、`fragments/*`、`shard_*`、`.work` 或 `.publishing`。
 
 六路相机固定顺序：
 
@@ -177,7 +168,7 @@ dataset-global `[dataset_from_index,dataset_to_index)`。每个 table 的 Episod
 
 | 字段 | dtype / shape | 语义 |
 |---|---|---|
-| 六路 `observation.images.*` | `video[256,256,3]` | RGB；缺失视角由 mask 声明 |
+| 六路 `observation.images.*` | `image[256,256,3]` 或 `video[256,256,3]` | Lance inline JPEG 使用 `image`，Parquet/H.264 使用 `video`；缺失视角由 mask 声明 |
 | `observation.state` | `float32[20]` | 双臂 absolute TCP，reshape 为 `[2,10]` |
 | `action` | `float32[20]` | 落盘字段；不作为训练监督，Action 由 state window 重算 |
 | `observation.tactile.values` | `float32[4,3,25,6]` | 可选触觉值 |

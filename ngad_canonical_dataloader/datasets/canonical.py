@@ -6,6 +6,7 @@ from bisect import bisect_right
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 import numpy as np
@@ -58,13 +59,7 @@ CANONICAL_IDENTITY_KEYS = (
 )
 CANONICAL_IMAGE_SIZE = 256
 DEFAULT_PROMPT = "A video recorded from a robot's point of view executing the following instruction: {task}"
-TABLE_MANIFEST_COLUMNS = {
-    "table_index",
-    "table_name",
-    "relative_path",
-    "num_episodes",
-    "num_frames",
-}
+TABLE_DIRECTORY_PATTERN = re.compile(r"table_(\d{3})")
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -75,93 +70,48 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return value
 
 
-def _read_table_manifest(dataset_root: Path) -> list[dict[str, Any]]:
-    """Read the only supported dataset-root topology from tables.parquet."""
-    try:
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-    except ImportError as error:
-        raise ImportError("Canonical table manifests require pyarrow.") from error
-
-    manifest_path = dataset_root / "tables.parquet"
-    if not manifest_path.is_file():
-        raise ValueError(f"{dataset_root} must contain tables.parquet.")
-    table = pq.read_table(manifest_path)
-    if set(table.column_names) != TABLE_MANIFEST_COLUMNS:
-        raise ValueError(
-            f"{manifest_path} columns must exactly match "
-            f"{sorted(TABLE_MANIFEST_COLUMNS)}."
-        )
-    expected_types = {
-        "table_index": pa.int64(),
-        "table_name": pa.string(),
-        "relative_path": pa.string(),
-        "num_episodes": pa.int64(),
-        "num_frames": pa.int64(),
-    }
-    for name, expected_type in expected_types.items():
-        if table.schema.field(name).type != expected_type:
-            raise ValueError(
-                f"{manifest_path} column {name!r} must be {expected_type}, "
-                f"got {table.schema.field(name).type}."
-            )
-
-    rows = table.to_pylist()
-    if not rows:
-        raise ValueError(f"{manifest_path} must list at least one table.")
+def _discover_published_tables(dataset_root: Path) -> list[dict[str, Any]]:
+    """Enumerate the published table directories in one canonical dataset root."""
+    if not dataset_root.is_dir():
+        raise ValueError(f"Canonical dataset root does not exist: {dataset_root}.")
+    records: list[dict[str, Any]] = []
     seen_indices: set[int] = set()
-    seen_names: set[str] = set()
-    seen_paths: set[str] = set()
-    normalized: list[dict[str, Any]] = []
-    resolved_dataset_root = dataset_root.resolve()
-    for row in rows:
-        table_index = int(row["table_index"])
-        table_name = str(row["table_name"])
-        relative_path = str(row["relative_path"])
-        num_episodes = int(row["num_episodes"])
-        num_frames = int(row["num_frames"])
-        relative = Path(relative_path)
-        if (
-            table_index < 0
-            or not table_name
-            or relative.is_absolute()
-            or len(relative.parts) != 1
-            or relative.parts[0] in {"", ".", ".."}
-            or table_name != relative_path
-            or num_episodes <= 0
-            or num_frames <= 0
-        ):
-            raise ValueError(f"Invalid table manifest row in {manifest_path}: {row}.")
-        if (
-            table_index in seen_indices
-            or table_name in seen_names
-            or relative_path in seen_paths
-        ):
-            raise ValueError(f"Duplicate table manifest row in {manifest_path}: {row}.")
-        table_root = (resolved_dataset_root / relative).resolve()
-        if table_root.parent != resolved_dataset_root or not table_root.is_dir():
+    for table_root in dataset_root.iterdir():
+        match = TABLE_DIRECTORY_PATTERN.fullmatch(table_root.name)
+        if match is None:
+            continue
+        table_index = int(match.group(1))
+        if table_index in seen_indices:
             raise ValueError(
-                f"{manifest_path} points to invalid table directory {relative_path!r}."
+                f"{dataset_root} contains duplicate table index {table_index}."
+            )
+        info_path = table_root / "meta" / "info.json"
+        if not table_root.is_dir() or not info_path.is_file():
+            raise ValueError(
+                f"Canonical table {table_root} must contain meta/info.json."
+            )
+        info = _read_json_object(info_path)
+        num_episodes = int(info.get("total_episodes", 0))
+        num_frames = int(info.get("total_frames", 0))
+        if num_episodes <= 0 or num_frames <= 0:
+            raise ValueError(
+                f"{info_path} must declare positive total_episodes and total_frames."
             )
         seen_indices.add(table_index)
-        seen_names.add(table_name)
-        seen_paths.add(relative_path)
-        normalized.append(
+        records.append(
             {
                 "table_index": table_index,
-                "table_name": table_name,
-                "table_root": table_root,
+                "table_name": table_root.name,
+                "table_root": table_root.resolve(),
                 "num_episodes": num_episodes,
                 "num_frames": num_frames,
             }
         )
-    ordered = sorted(normalized, key=lambda row: row["table_index"])
-    dataset_from_index = 0
-    for row in ordered:
-        row["dataset_from_index"] = dataset_from_index
-        dataset_from_index += row["num_frames"]
-        row["dataset_to_index"] = dataset_from_index
-    return ordered
+    if not records:
+        raise ValueError(
+            f"{dataset_root} must contain at least one published table_NNN directory."
+        )
+    return sorted(records, key=lambda row: row["table_index"])
 
 
 class CanonicalTCPTransform:
@@ -323,7 +273,7 @@ class NGADCanonicalDataset(Dataset):
             configured_root = configured["path"]
             physical_tables.extend(
                 (table_record, configured)
-                for table_record in _read_table_manifest(configured_root)
+                for table_record in _discover_published_tables(configured_root)
             )
 
         self.camera_keys = self.expected_camera_keys
@@ -359,11 +309,15 @@ class NGADCanonicalDataset(Dataset):
             table_backend, image_backend = create_storage_backends(
                 root,
                 table_record["table_name"],
-                table_record["dataset_from_index"],
                 info,
             )
             mask_contract = mask_contracts[configured["name"]]
-            self._validate_features(root, info.get("features", {}), mask_contract)
+            self._validate_features(
+                root,
+                info.get("features", {}),
+                mask_contract,
+                image_backend.feature_dtype,
+            )
             source_fps = float(info.get("fps", 0.0))
             if not np.isfinite(source_fps) or source_fps <= 0:
                 raise ValueError(f"{root} must declare a positive source fps.")
@@ -385,28 +339,28 @@ class NGADCanonicalDataset(Dataset):
             )
             if len(episodes) != table_record["num_episodes"]:
                 raise ValueError(
-                    f"{root} has {len(episodes)} episodes but tables.parquet declares "
+                    f"{root} has {len(episodes)} episodes but info.json declares "
                     f"{table_record['num_episodes']}."
                 )
             frame_count = sum(int(episode["length"]) for episode in episodes)
             if frame_count != table_record["num_frames"]:
                 raise ValueError(
-                    f"{root} has {frame_count} frames but tables.parquet declares "
+                    f"{root} has {frame_count} frames but info.json declares "
                     f"{table_record['num_frames']}."
                 )
-            expected_episode_start = table_record["dataset_from_index"]
+            expected_episode_start = 0
             for episode in episodes:
                 if episode["dataset_from_index"] != expected_episode_start:
                     raise ValueError(
-                        f"{root} episode offsets must be contiguous global indices; "
+                        f"{root} episode offsets must be contiguous table-local indices; "
                         f"expected {expected_episode_start}, got "
                         f"{episode['dataset_from_index']}."
                     )
                 expected_episode_start = episode["dataset_to_index"]
-            if expected_episode_start != table_record["dataset_to_index"]:
+            if expected_episode_start != table_record["num_frames"]:
                 raise ValueError(
                     f"{root} episode offsets end at {expected_episode_start}, "
-                    f"expected {table_record['dataset_to_index']}."
+                    f"expected {table_record['num_frames']}."
                 )
             train_episodes, validation_episodes = split_episode_indices(
                 [episode["episode_index"] for episode in episodes],
@@ -681,6 +635,7 @@ class NGADCanonicalDataset(Dataset):
         root: Path,
         features: dict[str, Any],
         contract: dict[str, Any],
+        expected_image_dtype: str,
     ) -> None:
         """Validate mapped physical fields declared available by the sidecar."""
         expected = {
@@ -710,7 +665,6 @@ class NGADCanonicalDataset(Dataset):
                     f"{root} physical feature {physical_name!r} mapped from "
                     f"{canonical_name!r} must have shape {shape}."
                 )
-        expected_image_dtype = "video"
         for camera, available in zip(
             self.camera_keys, contract["camera_mask"].tolist()
         ):

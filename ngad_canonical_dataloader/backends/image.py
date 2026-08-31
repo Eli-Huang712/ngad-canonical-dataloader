@@ -14,6 +14,8 @@ import torch
 class JpegImageBackend:
     """Decode canonical JPEG payloads stored in table rows."""
 
+    feature_dtype = "image"
+
     def read_camera(
         self,
         rows: dict[int, dict[str, Any]],
@@ -38,6 +40,8 @@ class JpegImageBackend:
 
 class H264ImageBackend:
     """Decode episode-relative RGB frames from LeRobot v3 H.264 shards."""
+
+    feature_dtype = "video"
 
     def __init__(self, root: Path, info: dict[str, Any]) -> None:
         self.root = root

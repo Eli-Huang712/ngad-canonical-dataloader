@@ -6,24 +6,16 @@ normalization、TCP128D packing 和完整输出 ABI。仓库在完整 Input Pipe
 
 ## 1. 物理存储后端
 
-`dataset_dirs[].path` 必须指向包含 `tables.parquet` 的 dataset root。Loader 只从该
-manifest 枚举已发布 table，不扫描目录或接受 single-root、fragment、shard 等其他拓扑。
+`dataset_dirs[].path` 必须指向一个 dataset root；Loader 只枚举其直接子目录中命名符合
+`table_NNN` 的已发布 table，不接受 root manifest、single-root、fragment 或 shard 拓扑。
+目录名中的数字决定 table 顺序。每个 table 的 `meta/info.json` 必须声明
+`total_episodes` 和 `total_frames`，Loader 会用 Episode metadata 再次核对这两个计数。
 
-`tables.parquet` 列严格为：
+Episode metadata 的 `dataset_from_index`、`dataset_to_index` 和物理数据行的 `index` 都是
+table-local，并在每张 table 中独立从 0 开始。Dataset 在这些物理索引之上建立统一的
+全局窗口索引；这个对外 sample index 不会被写回或冒充落盘 row index。
 
-| 列 | dtype | 语义 |
-|---|---|---|
-| `table_index` | `int64` | Dataset 内 table 顺序；决定全局索引拼接顺序 |
-| `table_name` | `string` | table 目录名，例如 `table_000` |
-| `relative_path` | `string` | dataset root 下的直接子目录，必须等于 `table_name` |
-| `num_episodes` | `int64` | table 的 Episode 数量 |
-| `num_frames` | `int64` | table 的总帧数；用于计算全局 frame prefix sum |
-
-Loader 会对 manifest 唯一性、目录边界、Episode 数量和总帧数做严格校验。每个 table 的
-`meta/info.json.storage_backend` 必须显式选择以下一种 backend；两种 payload 互斥。
-Loader 按 `table_index` 排序，并对 `num_frames` 做前缀和生成每张 table 的 dataset-global
-`[dataset_from_index,dataset_to_index)`。Episode metadata 与数据行 `index` 均保持全局
-索引；Lance backend 仅在执行 `take()` 前减去 table 的全局起点，转换为 physical row offset。
+每张 table 必须且只能发布下列一种 payload；backend 由这一唯一物理结构确定。
 
 ### 1.1 Lance + JPEG
 
@@ -42,8 +34,7 @@ Loader 按 `table_index` 排序，并对 `num_frames` 做前缀和生成每张 t
             └── *.lance
 ```
 
-该后端要求 `storage_backend == "lance_jpeg"`、
-`canonical_schema == "ngad_hy_canonical_lance_v2"`，并且
+该后端要求 `canonical_schema == "ngad_hy_canonical_lance_v2"`，并且
 `<table-name>/<table-name>.lance/data/` 至少包含一个 `*.lance`。图像以 JPEG payload
 存储在 Lance 行中。
 
@@ -63,9 +54,9 @@ Loader 按 `table_index` 排序，并对 `num_frames` 做前缀和生成每张 t
         └── .../*.mp4
 ```
 
-该后端要求 `storage_backend == "parquet_h264"`。实际 Parquet 和 MP4 路径由
-`info.json` 的 `data_path`、`video_path` 模板确定；视频使用 H.264 编码。两个后端都必须
-通过 episode metadata 提供 Episode 长度、全局数据 offset 和任务索引。
+该后端要求 `data/` 与 `videos/` 同时存在。实际 Parquet 和 MP4 路径由 `info.json` 的
+`data_path`、`video_path` 模板确定；视频使用 H.264 编码。两个后端都必须通过 episode
+metadata 提供 Episode 长度、table-local 数据 offset 和任务索引。
 
 ## 2. Canonical 输入字段
 
@@ -80,14 +71,15 @@ Loader 按 `table_index` 排序，并对 `num_frames` 做前缀和生成每张 t
 | 4 | `observation.images.cam_right_wrist_left` |
 | 5 | `observation.images.cam_right_wrist_right` |
 
-顺序不可改变。每路可用图像必须是 RGB `video[256,256,3]`；物理缺失由 mask contract
-声明，不允许按 backend 或数据集名称猜测。
+顺序不可改变。Lance inline JPEG 的可用图像必须声明为 RGB `image[256,256,3]`，
+Parquet/H.264 的可用图像必须声明为 RGB `video[256,256,3]`；物理缺失由 mask contract
+声明，不允许按数据集名称猜测。
 
 ### 2.2 字段合同
 
 | 字段 | dtype / shape | 语义 |
 |---|---|---|
-| 六路 `observation.images.*` | `video[256,256,3]` | RGB 图像；物理缺失由 mask 声明 |
+| 六路 `observation.images.*` | `image[256,256,3]` 或 `video[256,256,3]` | backend 对应的 RGB 图像；物理缺失由 mask 声明 |
 | `observation.state` | `float32[20]` | 双臂 absolute TCP，reshape 为 `[2,10]` |
 | `action` | `float32[20]` | Canonical schema 字段；训练监督不读取它，而是由 state window 重算 |
 | `observation.tactile.values` | `float32[4,3,25,6]` | 触觉值；可由 mask 声明缺失 |

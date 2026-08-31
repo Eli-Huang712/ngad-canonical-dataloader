@@ -32,11 +32,9 @@ class LanceTableBackend:
         self,
         table_root: Path,
         lance_root: Path,
-        table_from_index: int,
     ) -> None:
         self.table_root = table_root
         self.lance_root = lance_root
-        self.table_from_index = int(table_from_index)
         self._handle: Any | None = None
         self._pid = os.getpid()
 
@@ -108,9 +106,7 @@ class LanceTableBackend:
         except ImportError as error:
             raise ImportError("Lance canonical roots require pyarrow.") from error
 
-        episode_local_start = (
-            episode["dataset_from_index"] - self.table_from_index
-        )
+        episode_local_start = episode["dataset_from_index"]
         offsets = {episode_local_start}
         offsets.update(
             episode_local_start + int(relative_index)
