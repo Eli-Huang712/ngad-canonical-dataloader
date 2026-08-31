@@ -78,9 +78,7 @@ def test_storage_backend_factory_selects_only_supported_physical_pairs(tmp_path)
         create_storage_backends(tmp_path / "unknown", "table_002", {})
 
 
-def test_published_table_directories_are_the_only_supported_dataset_topology(tmp_path) -> None:
-    with pytest.raises(ValueError, match="at least one published table_NNN"):
-        _discover_published_tables(tmp_path)
+def test_dataset_root_discovers_direct_tables_in_numeric_order(tmp_path) -> None:
     table_root = tmp_path / "table_000"
     (table_root / "meta").mkdir(parents=True)
     second_table_root = tmp_path / "table_001"
@@ -110,6 +108,32 @@ def test_published_table_directories_are_the_only_supported_dataset_topology(tmp
             "num_frames": 20,
         }
     ]
+
+
+def test_single_table_root_is_returned_without_nested_discovery(tmp_path) -> None:
+    table_root = tmp_path / "table_000"
+    (table_root / "meta").mkdir(parents=True)
+    (table_root / "meta" / "info.json").write_text(
+        json.dumps({"total_episodes": 2, "total_frames": 80}),
+        encoding="utf-8",
+    )
+    nested = table_root / "table_001" / "meta"
+    nested.mkdir(parents=True)
+    (nested / "info.json").write_text(
+        json.dumps({"total_episodes": 1, "total_frames": 20}),
+        encoding="utf-8",
+    )
+
+    records = _discover_published_tables(table_root)
+
+    assert len(records) == 1
+    assert records[0]["table_name"] == "table_000"
+    assert records[0]["table_root"] == table_root
+
+
+def test_invalid_dataset_path_without_direct_tables_is_rejected(tmp_path) -> None:
+    with pytest.raises(ValueError, match="neither a table_NNN root"):
+        _discover_published_tables(tmp_path)
 
 
 def test_canonical_feature_names_match_the_published_contract() -> None:

@@ -67,7 +67,8 @@ video + state + action + masks + timestamps + prompt + data_info
 它完成：
 
 - 解析具名 `dataset_dirs`；
-- 从 dataset root 的直接子目录枚举并排序 `table_NNN`；
+- 从 dataset root 的直接子目录枚举并排序 `table_NNN`，或直接读取一张
+  single-table root；两种路径都不递归且没有 `table_name` 配置；
 - 根据 table 中唯一的 Lance 或 Parquet/H.264 payload 选择物理 backend；
 - 读取 task/episode metadata、source FPS、episode offsets 和视频时间范围；
 - 加载每个数据集自己的 mask-and-mapping contract 和 normalization stats；

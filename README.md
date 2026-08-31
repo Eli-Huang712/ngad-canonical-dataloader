@@ -109,9 +109,10 @@ Loading ABI 始终保留 `state[N,K,128]` 和 `action[N,K,128]`。如果模型�
 
 ### 期望的数据集文件拓扑
 
-Loader 只接受下面这一种 dataset-root 拓扑。根目录的直接子目录 `table_NNN` 就是已发布
-table 清单；每个 `table_NNN` 只能选择 Lance 或 Parquet 其中一种 payload，不允许同时
-存在两种 backend。
+`dataset_dirs[].path` 接受两种确定性正式拓扑：包含多个直接 `table_NNN` 子目录的
+dataset root，或直接指向一张 `table_NNN` 的 single-table root。前者只枚举直接子目录并
+按数字排序；后者只读取自身，不在 table 内继续搜索。两者都不递归，也不存在
+`table_name` 配置字段。
 
 ```text
 <dataset-root>/
@@ -151,7 +152,7 @@ Loader 按目录名中的数字排序，例如 `table_000`、`table_001`。每�
 
 backend 由每张 table 实际发布的唯一 payload 确定：`<table-name>.lance/` 表示 Lance +
 inline JPEG，`data/` 与 `videos/` 表示 Parquet + H.264。Loader 不接受根级 manifest、
-single root、`fragments/*`、`shard_*`、`.work` 或 `.publishing`。
+fragment、shard、`.work` 或 `.publishing` 等旧拓扑。
 
 六路相机固定顺序：
 

@@ -6,10 +6,14 @@ normalization、TCP128D packing 和完整输出 ABI。仓库在完整 Input Pipe
 
 ## 1. 物理存储后端
 
-`dataset_dirs[].path` 必须指向一个 dataset root；Loader 只枚举其直接子目录中命名符合
-`table_NNN` 的已发布 table，不接受 root manifest、single-root、fragment 或 shard 拓扑。
-目录名中的数字决定 table 顺序。每个 table 的 `meta/info.json` 必须声明
-`total_episodes` 和 `total_frames`，Loader 会用 Episode metadata 再次核对这两个计数。
+`dataset_dirs[].path` 可以指向 dataset root，也可以直接指向 single-table root：
+
+- dataset root：只枚举直接子目录中名称严格匹配 `table_\d{3}` 的 table，并按数字排序；
+- single-table root：当 path 自身是 `table_\d{3}` 时，只读取 path 自身，不继续向内搜索。
+
+两者是确定性正式拓扑，不是递归 fallback，也不存在 `table_name` 配置字段。Loader 不接受
+root manifest、fragment 或 shard 拓扑。每个 table 的 `meta/info.json` 必须声明
+`total_episodes` 和 `total_frames`，并使用相同逻辑核对 Episode metadata 和 frame count。
 
 Episode metadata 的 `dataset_from_index`、`dataset_to_index` 和物理数据行的 `index` 都是
 table-local，并在每张 table 中独立从 0 开始。Dataset 在这些物理索引之上建立统一的
