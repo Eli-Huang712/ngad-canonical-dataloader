@@ -122,10 +122,14 @@ class CanonicalTCPTransform:
         state_xyz_min: torch.Tensor,
         state_xyz_max: torch.Tensor,
         action_xyz_scale: torch.Tensor,
+        gripper_open_value: torch.Tensor,
+        gripper_closed_value: torch.Tensor,
     ) -> None:
         self.state_xyz_min = torch.as_tensor(state_xyz_min, dtype=torch.float32)
         self.state_xyz_max = torch.as_tensor(state_xyz_max, dtype=torch.float32)
         self.action_xyz_scale = torch.as_tensor(action_xyz_scale, dtype=torch.float32)
+        self.gripper_open_value = torch.as_tensor(gripper_open_value, dtype=torch.float32)
+        self.gripper_closed_value = torch.as_tensor(gripper_closed_value, dtype=torch.float32)
 
     @staticmethod
     def _flatten_state(absolute_state: torch.Tensor) -> torch.Tensor:
@@ -148,6 +152,8 @@ class CanonicalTCPTransform:
             self._flatten_state(absolute_state_targets),
             self.state_xyz_min,
             self.state_xyz_max,
+            self.gripper_open_value,
+            self.gripper_closed_value,
         )
         state = pack_dual_arm_tcp(normalized)
         return state * feature_mask.to(state.dtype), feature_mask
@@ -163,7 +169,12 @@ class CanonicalTCPTransform:
         anchor = self._flatten_state(anchor_state)
         targets = self._flatten_state(absolute_state_targets)
         relative = dual_arm_tcp_target_relative_to_anchor(anchor.unsqueeze(0), targets)
-        normalized = normalize_dual_arm_relative_tcp(relative, self.action_xyz_scale)
+        normalized = normalize_dual_arm_relative_tcp(
+            relative,
+            self.action_xyz_scale,
+            self.gripper_open_value,
+            self.gripper_closed_value,
+        )
         action = pack_dual_arm_tcp(normalized)
         return action * feature_mask.to(action.dtype), feature_mask
 
@@ -691,9 +702,23 @@ class NGADCanonicalDataset(Dataset):
             raise ValueError(
                 f"Expected normalization schema {NGAD_CANONICAL_SCHEMA}, got {stats.get('schema_version')}."
             )
+        required_fields = {
+            "state_xyz_min",
+            "state_xyz_max",
+            "action_xyz_scale",
+            "gripper_open_value",
+            "gripper_closed_value",
+        }
+        missing_fields = sorted(required_fields - stats.keys())
+        if missing_fields:
+            raise ValueError(
+                f"Canonical normalization is missing required fields: {missing_fields}."
+            )
         state_xyz_min = torch.tensor(stats["state_xyz_min"], dtype=torch.float32)
         state_xyz_max = torch.tensor(stats["state_xyz_max"], dtype=torch.float32)
         action_xyz_scale = torch.tensor(stats["action_xyz_scale"], dtype=torch.float32)
+        gripper_open_value = torch.tensor(stats["gripper_open_value"], dtype=torch.float32)
+        gripper_closed_value = torch.tensor(stats["gripper_closed_value"], dtype=torch.float32)
         for name, value in (
             ("state_xyz_min", state_xyz_min),
             ("state_xyz_max", state_xyz_max),
@@ -703,7 +728,23 @@ class NGADCanonicalDataset(Dataset):
                 raise ValueError(f"Canonical normalization {name} must be finite [2,3].")
         if torch.any(state_xyz_max <= state_xyz_min) or torch.any(action_xyz_scale <= 0):
             raise ValueError("Canonical xyz normalization ranges must be positive.")
-        return CanonicalTCPTransform(state_xyz_min, state_xyz_max, action_xyz_scale)
+        if (
+            gripper_open_value.shape != (2,)
+            or gripper_closed_value.shape != (2,)
+            or not torch.isfinite(gripper_open_value).all()
+            or not torch.isfinite(gripper_closed_value).all()
+            or torch.any((gripper_open_value - gripper_closed_value).abs() < 1.0e-6)
+        ):
+            raise ValueError(
+                "Canonical gripper open/closed values must be distinct finite [2] arrays."
+            )
+        return CanonicalTCPTransform(
+            state_xyz_min,
+            state_xyz_max,
+            action_xyz_scale,
+            gripper_open_value,
+            gripper_closed_value,
+        )
 
     def __len__(self) -> int:
         return self._length
