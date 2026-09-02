@@ -6,13 +6,16 @@ normalization、TCP128D packing 和完整输出 ABI。仓库在完整 Input Pipe
 
 ## 1. 物理存储后端
 
-`dataset_dirs[].path` 可以指向 dataset root，也可以直接指向 single-table root：
+`dataset_dirs[].path` 可以使用三种正式拓扑：
 
 - dataset root：只枚举直接子目录中名称严格匹配 `table_\d{3}` 的 table，并按数字排序；
 - single-table root：当 path 自身是 `table_\d{3}` 时，只读取 path 自身，不继续向内搜索。
+- flat LeRobot v3 root：path 自身直接包含 `meta/info.json`、`data/` 和 `videos/`，把整个
+  root 作为唯一 physical table。
 
-两者是确定性正式拓扑，不是递归 fallback，也不存在 `table_name` 配置字段。Loader 不接受
-root manifest、fragment 或 shard 拓扑。每个 table 的 `meta/info.json` 必须声明
+三者是确定性正式拓扑，不是递归 fallback，也不存在 `table_name` 配置字段。Flat payload
+与直接 `table_NNN` 子目录同时存在时属于歧义并立即报错。Loader 不接受 root manifest、
+fragment 或 shard 拓扑。每个 physical table 的 `meta/info.json` 必须声明
 `total_episodes` 和 `total_frames`，并使用相同逻辑核对 Episode metadata 和 frame count。
 
 Episode metadata 的 `dataset_from_index`、`dataset_to_index` 和物理数据行的 `index` 都是

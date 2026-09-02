@@ -112,10 +112,10 @@ Canonical mode 保留 `state[N,K,128]` 和 `action[N,K,128]`；如果模型需�
 
 ### 期望的数据集文件拓扑
 
-`dataset_dirs[].path` 接受两种确定性正式拓扑：包含多个直接 `table_NNN` 子目录的
-dataset root，或直接指向一张 `table_NNN` 的 single-table root。前者只枚举直接子目录并
-按数字排序；后者只读取自身，不在 table 内继续搜索。两者都不递归，也不存在
-`table_name` 配置字段。
+`dataset_dirs[].path` 接受三种确定性正式拓扑：包含多个直接 `table_NNN` 子目录的
+dataset root、直接指向一张 `table_NNN` 的 single-table root，或根目录直接包含
+`meta/info.json + data/ + videos/` 的 flat LeRobot v3 root。三者都不递归，也不存在
+`table_name` 配置字段；同时出现 flat payload 和 `table_NNN` 子目录时立即报错。
 
 ```text
 <dataset-root>/

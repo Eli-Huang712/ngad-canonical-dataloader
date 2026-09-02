@@ -132,6 +132,48 @@ def test_single_table_root_is_returned_without_nested_discovery(tmp_path) -> Non
     assert records[0]["table_root"] == table_root
 
 
+def test_flat_lerobot_root_is_returned_as_one_physical_table(tmp_path) -> None:
+    root = tmp_path / "umi-canonical-v3"
+    (root / "meta").mkdir(parents=True)
+    (root / "data").mkdir()
+    (root / "videos").mkdir()
+    (root / "meta" / "info.json").write_text(
+        json.dumps({"total_episodes": 3, "total_frames": 120}),
+        encoding="utf-8",
+    )
+
+    records = _discover_published_tables(root)
+
+    assert records == [
+        {
+            "table_index": 0,
+            "table_name": "umi-canonical-v3",
+            "table_root": root,
+            "num_episodes": 3,
+            "num_frames": 120,
+        }
+    ]
+
+
+def test_mixed_flat_and_table_children_are_rejected_as_ambiguous(tmp_path) -> None:
+    (tmp_path / "meta").mkdir()
+    (tmp_path / "data").mkdir()
+    (tmp_path / "videos").mkdir()
+    (tmp_path / "meta" / "info.json").write_text(
+        json.dumps({"total_episodes": 3, "total_frames": 120}),
+        encoding="utf-8",
+    )
+    table_meta = tmp_path / "table_000" / "meta"
+    table_meta.mkdir(parents=True)
+    (table_meta / "info.json").write_text(
+        json.dumps({"total_episodes": 1, "total_frames": 40}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        _discover_published_tables(tmp_path)
+
+
 def test_invalid_dataset_path_without_direct_tables_is_rejected(tmp_path) -> None:
     with pytest.raises(ValueError, match="neither a table_NNN root"):
         _discover_published_tables(tmp_path)

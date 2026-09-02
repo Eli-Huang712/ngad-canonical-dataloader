@@ -70,10 +70,14 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return value
 
 
-def _table_record_from_root(table_root: Path) -> dict[str, Any]:
+def _table_record_from_root(
+    table_root: Path,
+    *,
+    flat_table_index: int | None = None,
+) -> dict[str, Any]:
     """Build one validated physical-table record from its direct root."""
     match = TABLE_DIRECTORY_PATTERN.fullmatch(table_root.name)
-    if match is None or not table_root.is_dir():
+    if not table_root.is_dir() or (match is None and flat_table_index is None):
         raise ValueError(f"Canonical table root must be a table_NNN directory: {table_root}.")
     info_path = table_root / "meta" / "info.json"
     if not info_path.is_file():
@@ -86,7 +90,9 @@ def _table_record_from_root(table_root: Path) -> dict[str, Any]:
             f"{info_path} must declare positive total_episodes and total_frames."
         )
     return {
-        "table_index": int(match.group(1)),
+        "table_index": (
+            int(match.group(1)) if flat_table_index is None else int(flat_table_index)
+        ),
         "table_name": table_root.name,
         "table_root": table_root.resolve(),
         "num_episodes": num_episodes,
@@ -95,21 +101,35 @@ def _table_record_from_root(table_root: Path) -> dict[str, Any]:
 
 
 def _discover_published_tables(dataset_path: Path) -> list[dict[str, Any]]:
-    """Resolve one dataset-root or direct single-table-root input path."""
+    """Resolve one dataset-root, table-root, or flat LeRobot v3 input path."""
     if not dataset_path.is_dir():
         raise ValueError(f"Canonical dataset path does not exist: {dataset_path}.")
     if TABLE_DIRECTORY_PATTERN.fullmatch(dataset_path.name):
         return [_table_record_from_root(dataset_path)]
 
-    records = [
-        _table_record_from_root(table_root)
+    table_roots = [
+        table_root
         for table_root in dataset_path.iterdir()
         if TABLE_DIRECTORY_PATTERN.fullmatch(table_root.name)
     ]
+    is_flat_lerobot = (
+        (dataset_path / "meta" / "info.json").is_file()
+        and (dataset_path / "data").is_dir()
+        and (dataset_path / "videos").is_dir()
+    )
+    if is_flat_lerobot and table_roots:
+        raise ValueError(
+            f"Canonical dataset path is ambiguous: {dataset_path} contains both "
+            "a flat LeRobot v3 payload and direct table_NNN children."
+        )
+    if is_flat_lerobot:
+        return [_table_record_from_root(dataset_path, flat_table_index=0)]
+
+    records = [_table_record_from_root(table_root) for table_root in table_roots]
     if not records:
         raise ValueError(
-            f"{dataset_path} is neither a table_NNN root nor a dataset root "
-            "with direct table_NNN children."
+            f"{dataset_path} is neither a table_NNN root, a flat LeRobot v3 root, "
+            "nor a dataset root with direct table_NNN children."
         )
     return sorted(records, key=lambda row: row["table_index"])
 

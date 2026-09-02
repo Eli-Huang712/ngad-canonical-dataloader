@@ -48,7 +48,7 @@ config.py
   │
   ▼
 Dataset.__init__()
-枚举 table_NNN → 按唯一物理 payload 选择 backend → 读取 task/episode metadata
+解析 dataset/table/flat root → 按唯一物理 payload 选择 backend → 读取 task/episode metadata
 → 加载 per-root mask/mapping 和 global stats → 建立统一全局 anchor 索引与 TimelineLayout
   │
   ▼
@@ -67,8 +67,9 @@ canonical: 上述字段 + state + action + action/feature/element mask
 它完成：
 
 - 解析具名 `dataset_dirs`；
-- 从 dataset root 的直接子目录枚举并排序 `table_NNN`，或直接读取一张
-  single-table root；两种路径都不递归且没有 `table_name` 配置；
+- 从 dataset root 的直接子目录枚举并排序 `table_NNN`、直接读取一张 single-table root，
+  或把 `meta/info.json + data/ + videos/` 的 flat LeRobot v3 root 作为唯一 physical table；
+  三种路径都不递归且没有 `table_name` 配置；
 - 根据 table 中唯一的 Lance 或 Parquet/H.264 payload 选择物理 backend；
 - 读取 task/episode metadata、source FPS、episode offsets 和视频时间范围；
 - 加载每个数据集自己的 mask-and-mapping contract，并为所有混合数据加载唯一一份
