@@ -111,8 +111,8 @@ Parquet/H.264 的可用图像必须声明为 RGB `video[256,256,3]`；物理缺�
 
 `dataset.normalization_stats_path` 是必填字段，并且是 sample mode 的唯一选择器：
 
-- 非空字符串：canonical mode。LIBERO、Hy、UMI 和其他 canonical table 共用这一份
-  global normalization；Dataset 只加载一次并只构造一个 `CanonicalTCPTransform`；
+- 非空字符串：canonical mode。一个 Dataset 实例只加载这一份 normalization，并只构造
+  一个 `CanonicalTCPTransform`。使用逐 table stats 时，每份 YAML 只配置对应 table；
 - `null`：video-only mode。不读取 normalization 文件，不创建 TCP transform，不插值或
   normalization state/action，也不生成 dummy stats 或伪造 TCP128。
 
@@ -120,8 +120,10 @@ Video-only 只读取图像构造所需的 identity metadata；sidecar 可以将 
 tactile 标记为无效，row backend 不会读取这些字段。Canonical mode 仍严格要求有效 State，
 并由 State 重建 Action。
 
-各 table 的原始 `meta/stats.json` 不是正式时间轴上重构的 anchor-relative Action 统计，
-禁止直接作为 canonical global normalization 输入。
+各 table 的原始 `meta/stats.json` 不是正式时间轴上重构的 anchor-relative Action
+统计，也不符合当前 normalization schema；必须先生成正式的 `table_NNN.json`。
+Action 统计尚未准备好时，`action_xyz_scale` 只能使用占位值，并且 Action field/element mask
+必须全部关闭。
 
 `mask_and_mapping_path` 指向的 JSON 顶层必须严格为：
 
@@ -159,10 +161,16 @@ Normalization JSON 使用 `ngad_canonical_tcp_v1` schema，并提供双臂独立
 state_xyz_min:    [2,3]
 state_xyz_max:    [2,3]
 action_xyz_scale: [2,3]
+gripper_open_value:   [2]
+gripper_closed_value: [2]
 ```
 
-Dataset 不在训练期间计算或更新统计量。多个数据集混合时，所有合法 anchor 按窗口数量自然
-组成同一个全局索引；每个 sample 使用其所属数据集的 mask 和 normalization stats。
+五个字段都是必填项，不提供旧格式 fallback。Loader 使用
+`(value - closed) / (open - closed)` 将源夹爪映射到 canonical openness `[0,1]`。HY 的
+`open=[0,0]`、`closed=[90,90]`，因此 `0/45/90` 映射为 `1/0.5/0`。
+
+Dataset 不在训练期间计算或更新统计量。需要不同 stats 的 table 必须分别构造 Dataset，
+训练侧再依次消费；只有确实共用同一份 stats 的 table 才能放进同一个 Dataset 实例。
 
 ## 4. 统一时间轴
 

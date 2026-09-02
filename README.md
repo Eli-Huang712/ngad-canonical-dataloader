@@ -55,7 +55,7 @@ action : [81,2,128]
 
 完整模板见 [configs/canonical.yaml](configs/canonical.yaml)。
 
-`normalization_stats_path` 是必填全局字段。非空路径进入 canonical mode；设为 `null` 时
+`normalization_stats_path` 是每个 Dataset 实例的必填字段。非空路径进入 canonical mode；设为 `null` 时
 进入临时的 video-only mode，只加载真实 video/mask/prompt/frame metadata，不读取统计量，
 也不读取 sidecar 中无效的 state/tactile，不生成 state/action、dummy stats 或伪造 TCP128。
 
@@ -180,10 +180,14 @@ fragment、shard、`.work` 或 `.publishing` 等旧拓扑。
 | identity fields | scalar | `timestamp/frame_index/episode_index/index/task_index` |
 
 每臂 TCP10 为 XYZ `[3]`、row-major Rot6D `[6]`、absolute gripper openness `[1]`。
-每个 `dataset_dirs` 条目只提供 `name`、`path` 和 `mask_and_mapping_path`。一次混合训练在
-`dataset.normalization_stats_path` 提供唯一的 global normalization；所有 physical table
-共用它。Dataset 不在训练时统计，也不接受各 table 的 `meta/stats.json` 代替正式的
-anchor-relative canonical global stats。
+每个 `dataset_dirs` 条目只提供 `name`、`path` 和 `mask_and_mapping_path`。一个 Dataset 实例
+由 `dataset.normalization_stats_path` 提供唯一 normalization；逐 table stats 场景下，每份
+YAML 只配置一个 table，再由训练侧依次加载。Dataset 不在训练时统计，也不直接接受各 table
+的原始 `meta/stats.json`。
+
+正式 normalization stats 必须同时包含 `state_xyz_min[2,3]`、`state_xyz_max[2,3]`、
+`action_xyz_scale[2,3]`、`gripper_open_value[2]` 和 `gripper_closed_value[2]`，不提供旧 stats
+fallback。夹爪按 `(value-closed)/(open-closed)` 转成 `[0,1]` openness。
 
 物理目录拓扑、mask JSON、时间轴、插值、relative pose、normalization 和 TCP128D 规划见
 [Canonical Data Contract](docs/data-contract.md)。

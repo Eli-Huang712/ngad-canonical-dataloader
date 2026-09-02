@@ -17,7 +17,11 @@ from ngad_canonical_dataloader.datasets.canonical import (
     _discover_published_tables,
 )
 from ngad_canonical_dataloader.datasets import canonical as canonical_module
-from ngad_canonical_dataloader.action import element_mask_to_feature_mask, pack_dual_arm_tcp
+from ngad_canonical_dataloader.action import (
+    element_mask_to_feature_mask,
+    normalize_dual_arm_absolute_tcp,
+    pack_dual_arm_tcp,
+)
 from ngad_canonical_dataloader.windows import (
     build_timeline_layout,
     timeline_sample_indices,
@@ -26,6 +30,34 @@ from ngad_canonical_dataloader.windows import (
 
 def test_dataset_classes_are_importable() -> None:
     assert NGADCanonicalDataset.__name__ == "NGADCanonicalDataset"
+
+
+def test_hy_gripper_values_map_to_canonical_openness() -> None:
+    tcp = torch.zeros(3, 20)
+    tcp[:, 9] = torch.tensor([0.0, 45.0, 90.0])
+    tcp[:, 19] = torch.tensor([90.0, 45.0, 0.0])
+    normalized = normalize_dual_arm_absolute_tcp(
+        tcp,
+        torch.zeros(2, 3),
+        torch.ones(2, 3),
+        torch.tensor([0.0, 0.0]),
+        torch.tensor([90.0, 90.0]),
+    )
+
+    torch.testing.assert_close(normalized[:, 9], torch.tensor([1.0, 0.5, 0.0]))
+    torch.testing.assert_close(normalized[:, 19], torch.tensor([0.0, 0.5, 1.0]))
+
+
+def test_normalization_stats_require_gripper_endpoints() -> None:
+    with pytest.raises(ValueError, match="gripper_closed_value.*gripper_open_value"):
+        NGADCanonicalDataset._normalization_transform(
+            {
+                "schema_version": "ngad_canonical_tcp_v1",
+                "state_xyz_min": [[-1, -1, -1], [-1, -1, -1]],
+                "state_xyz_max": [[1, 1, 1], [1, 1, 1]],
+                "action_xyz_scale": [[1, 1, 1], [1, 1, 1]],
+            }
+        )
 
 
 def test_fixed_canonical_abi_is_not_configurable() -> None:
@@ -473,6 +505,8 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
                 "state_xyz_min": [[-1, -1, -1], [-1, -1, -1]],
                 "state_xyz_max": [[1, 1, 1], [1, 1, 1]],
                 "action_xyz_scale": [[1, 1, 1], [1, 1, 1]],
+                "gripper_open_value": [1, 1],
+                "gripper_closed_value": [0, 0],
             }
         ),
         encoding="utf-8",

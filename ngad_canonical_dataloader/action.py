@@ -117,6 +117,18 @@ def minmax_normalize(value: torch.Tensor, minimum: torch.Tensor, maximum: torch.
     return normalized.clamp(-5.0, 5.0)
 
 
+def normalize_gripper_openness(
+    value: torch.Tensor,
+    open_value: torch.Tensor,
+    closed_value: torch.Tensor,
+) -> torch.Tensor:
+    """Map physical gripper values to canonical openness in ``[0,1]``."""
+    value_range = open_value - closed_value
+    if torch.any(value_range.abs() < 1.0e-6):
+        raise ValueError("Gripper open and closed values must be distinct.")
+    return ((value - closed_value) / value_range).clamp(0.0, 1.0)
+
+
 def tcp_target_relative_to_anchor(anchor: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Express target TCP poses in the fixed anchor TCP frame."""
     anchor_rotation = rotation_6d_rows_to_matrix(anchor[..., 3:9])
@@ -199,30 +211,62 @@ def normalize_dual_arm_absolute_tcp(
     tcp: torch.Tensor,
     xyz_minimum: torch.Tensor,
     xyz_maximum: torch.Tensor,
+    gripper_open_value: torch.Tensor,
+    gripper_closed_value: torch.Tensor,
 ) -> torch.Tensor:
-    """Normalize the xyz block of each arm while preserving Rot6D and openness."""
-    if tcp.shape[-1] != DUAL_ARM_TCP_FEATURE_DIM or xyz_minimum.shape != (2, 3) or xyz_maximum.shape != (2, 3):
-        raise ValueError("Dual-arm absolute normalization requires TCP20 and [2,3] xyz statistics.")
-    return torch.cat(
+    """Normalize xyz and source gripper values independently for each arm."""
+    if (
+        tcp.shape[-1] != DUAL_ARM_TCP_FEATURE_DIM
+        or xyz_minimum.shape != (2, 3)
+        or xyz_maximum.shape != (2, 3)
+        or gripper_open_value.shape != (2,)
+        or gripper_closed_value.shape != (2,)
+    ):
+        raise ValueError(
+            "Dual-arm absolute normalization requires TCP20, [2,3] xyz stats, "
+            "and [2] gripper endpoints."
+        )
+    normalized = torch.cat(
         [
             normalize_absolute_tcp(tcp[..., :TCP_FEATURE_DIM], xyz_minimum[0], xyz_maximum[0]),
             normalize_absolute_tcp(tcp[..., TCP_FEATURE_DIM:], xyz_minimum[1], xyz_maximum[1]),
         ],
         dim=-1,
     )
+    normalized[..., [9, 19]] = normalize_gripper_openness(
+        tcp[..., [9, 19]], gripper_open_value, gripper_closed_value
+    )
+    return normalized
 
 
-def normalize_dual_arm_relative_tcp(tcp: torch.Tensor, xyz_scale: torch.Tensor) -> torch.Tensor:
-    """Normalize each arm's fixed-anchor xyz with independent symmetric scales."""
-    if tcp.shape[-1] != DUAL_ARM_TCP_FEATURE_DIM or xyz_scale.shape != (2, 3):
-        raise ValueError("Dual-arm relative normalization requires TCP20 and [2,3] xyz scales.")
-    return torch.cat(
+def normalize_dual_arm_relative_tcp(
+    tcp: torch.Tensor,
+    xyz_scale: torch.Tensor,
+    gripper_open_value: torch.Tensor,
+    gripper_closed_value: torch.Tensor,
+) -> torch.Tensor:
+    """Normalize relative xyz and source gripper values for each arm."""
+    if (
+        tcp.shape[-1] != DUAL_ARM_TCP_FEATURE_DIM
+        or xyz_scale.shape != (2, 3)
+        or gripper_open_value.shape != (2,)
+        or gripper_closed_value.shape != (2,)
+    ):
+        raise ValueError(
+            "Dual-arm relative normalization requires TCP20, [2,3] xyz scales, "
+            "and [2] gripper endpoints."
+        )
+    normalized = torch.cat(
         [
             normalize_relative_tcp(tcp[..., :TCP_FEATURE_DIM], xyz_scale[0]),
             normalize_relative_tcp(tcp[..., TCP_FEATURE_DIM:], xyz_scale[1]),
         ],
         dim=-1,
     )
+    normalized[..., [9, 19]] = normalize_gripper_openness(
+        tcp[..., [9, 19]], gripper_open_value, gripper_closed_value
+    )
+    return normalized
 
 
 def denormalize_dual_arm_relative_tcp(tcp: torch.Tensor, xyz_scale: torch.Tensor) -> torch.Tensor:
