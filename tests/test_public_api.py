@@ -411,6 +411,55 @@ def test_field_mapping_rejects_disabled_canonical_fields(tmp_path) -> None:
         dataset._load_mask_and_mapping_contract(path, "invalid")
 
 
+def test_relative_action_mask_does_not_require_a_physical_action_field(tmp_path) -> None:
+    np.savez(tmp_path / "pixel_mask.npz", mask=np.ones((256, 256), dtype=np.bool_))
+    field_mask = {
+        camera: camera == CANONICAL_CAMERA_KEYS[0] for camera in CANONICAL_CAMERA_KEYS
+    }
+    field_mask.update(
+        {
+            "observation.state": True,
+            "action": False,
+            CANONICAL_TACTILE_VALUES_KEY: True,
+            CANONICAL_TACTILE_DT_KEY: True,
+            "timestamp": True,
+            "frame_index": True,
+            "episode_index": True,
+            "index": True,
+            "task_index": True,
+        }
+    )
+    path = tmp_path / "mask_and_mapping.json"
+    path.write_text(
+        json.dumps(
+            {
+                "dataset": "derived-action",
+                "field_mapping": {},
+                "field_mask": field_mask,
+                "element_mask": {
+                    "observation.state": [True] * 9 + [False] + [True] * 9 + [False],
+                    "action": [True] * 9 + [False] + [True] * 9 + [False],
+                },
+                "image_pixel_mask": {
+                    "path": "pixel_mask.npz",
+                    "key": "mask",
+                    "shape": [256, 256],
+                    "applies_to_all_available_images": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
+    dataset.camera_keys = CANONICAL_CAMERA_KEYS
+    dataset.video_only = False
+
+    contract = dataset._load_mask_and_mapping_contract(path, "derived-action")
+
+    assert not contract["field_mask"]["action"]
+    assert contract["action_element_mask"].sum().item() == 18
+
+
 def test_canonical_video_preparation_only_normalizes_fixed_uint8_frames() -> None:
     dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
     video = torch.zeros((2, 3, 256, 256), dtype=torch.uint8)
@@ -467,8 +516,8 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
         {
             "observation.state": True,
             "action": True,
-            CANONICAL_TACTILE_VALUES_KEY: False,
-            CANONICAL_TACTILE_DT_KEY: False,
+            CANONICAL_TACTILE_VALUES_KEY: True,
+            CANONICAL_TACTILE_DT_KEY: True,
             "timestamp": True,
             "frame_index": True,
             "episode_index": True,
@@ -560,6 +609,14 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
                 }
                 if field_mask["observation.state"]:
                     row["observation.state"] = tcp10 + tcp10
+                if field_mask[CANONICAL_TACTILE_VALUES_KEY]:
+                    row[CANONICAL_TACTILE_VALUES_KEY] = torch.full(
+                        (4, 3, 25, 6), float(frame), dtype=torch.float32
+                    )
+                if field_mask[CANONICAL_TACTILE_DT_KEY]:
+                    row[CANONICAL_TACTILE_DT_KEY] = torch.tensor(
+                        [[-0.03, -0.02, -0.01]] * 4, dtype=torch.float32
+                    )
                 rows[frame] = row
             return rows
 
@@ -618,6 +675,14 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
     assert sample["camera_mask"].shape == (3, 6)
     assert sample["image_pixel_mask"].shape == (3, 6, 256, 256)
     assert sample["state_feature_mask"].shape == (128,)
+    assert sample[CANONICAL_TACTILE_VALUES_KEY].shape == (3, 16, 4, 25, 6)
+    assert sample[CANONICAL_TACTILE_DT_KEY].shape == (3, 16, 4)
+    assert sample["tactile_field_mask"].tolist() == [True, True]
+    assert torch.all(sample[CANONICAL_TACTILE_VALUES_KEY][1, -3:] == 2.0)
+    torch.testing.assert_close(
+        sample[CANONICAL_TACTILE_DT_KEY][1, -3:, 0],
+        torch.tensor([-0.03, -0.02, -0.01]),
+    )
     assert "anchor_state" not in sample
     assert "anchor_state_feature_mask" not in sample
     torch.testing.assert_close(

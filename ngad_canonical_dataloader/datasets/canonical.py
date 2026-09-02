@@ -58,8 +58,104 @@ CANONICAL_IDENTITY_KEYS = (
     "task_index",
 )
 CANONICAL_IMAGE_SIZE = 256
+TACTILE_PACKETS_PER_SOURCE_FRAME = 3
+TACTILE_HISTORY_STEPS = 16
 DEFAULT_PROMPT = "A video recorded from a robot's point of view executing the following instruction: {task}"
 TABLE_DIRECTORY_PATTERN = re.compile(r"table_(\d{3})")
+
+
+def _tactile_history_source_indices(
+    source_frame_indices: torch.Tensor,
+    *,
+    episode_length: int,
+) -> torch.Tensor:
+    """Select enough causal source rows for one 16-packet tactile history."""
+    if source_frame_indices.ndim != 1:
+        raise ValueError("source_frame_indices must be one-dimensional.")
+    history_rows = (
+        TACTILE_HISTORY_STEPS + TACTILE_PACKETS_PER_SOURCE_FRAME - 1
+    ) // TACTILE_PACKETS_PER_SOURCE_FRAME
+    offsets = torch.arange(1 - history_rows, 1, dtype=torch.long)
+    return (
+        source_frame_indices.to(dtype=torch.long).unsqueeze(1) + offsets
+    ).clamp(min=0, max=int(episode_length) - 1)
+
+
+def _build_tactile_history(
+    *,
+    source_frame_indices: torch.Tensor,
+    episode_length: int,
+    rows: dict[int, dict[str, Any]],
+    tactile_mask: torch.Tensor,
+    frame_valid: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Align raw tactile packets to each RGB frame using causal 16-step histories."""
+    frame_count = int(source_frame_indices.numel())
+    values = torch.zeros(
+        (frame_count, TACTILE_HISTORY_STEPS, 4, 25, 6), dtype=torch.float32
+    )
+    relative_dt = torch.zeros(
+        (frame_count, TACTILE_HISTORY_STEPS, 4), dtype=torch.float32
+    )
+    history_indices = _tactile_history_source_indices(
+        source_frame_indices,
+        episode_length=episode_length,
+    )
+
+    if bool(tactile_mask[0].item()):
+        raw_values = torch.stack(
+            [
+                torch.as_tensor(
+                    rows[int(source_index)][CANONICAL_TACTILE_VALUES_KEY],
+                    dtype=torch.float32,
+                )
+                for source_index in history_indices.reshape(-1).tolist()
+            ]
+        ).reshape(frame_count, history_indices.shape[1], 4, 3, 25, 6)
+        values = raw_values.permute(0, 1, 3, 2, 4, 5).reshape(
+            frame_count, -1, 4, 25, 6
+        )[:, -TACTILE_HISTORY_STEPS:]
+
+    if bool(tactile_mask[1].item()):
+        raw_dt = torch.stack(
+            [
+                torch.as_tensor(
+                    rows[int(source_index)][CANONICAL_TACTILE_DT_KEY],
+                    dtype=torch.float64,
+                )
+                for source_index in history_indices.reshape(-1).tolist()
+            ]
+        ).reshape(frame_count, history_indices.shape[1], 4, 3)
+        row_timestamps = torch.tensor(
+            [
+                float(rows[int(source_index)]["timestamp"])
+                for source_index in history_indices.reshape(-1).tolist()
+            ],
+            dtype=torch.float64,
+        ).reshape(frame_count, history_indices.shape[1], 1, 1)
+        target_timestamps = torch.tensor(
+            [
+                float(rows[int(source_index)]["timestamp"])
+                for source_index in source_frame_indices.tolist()
+            ],
+            dtype=torch.float64,
+        ).reshape(frame_count, 1, 1)
+        packet_timestamps = row_timestamps + raw_dt
+        relative_dt = (
+            packet_timestamps.permute(0, 1, 3, 2)
+            .reshape(frame_count, -1, 4)[:, -TACTILE_HISTORY_STEPS:]
+            .sub(target_timestamps)
+            .to(dtype=torch.float32)
+        )
+
+    valid = frame_valid.to(dtype=torch.bool)
+    values = torch.where(
+        valid[:, None, None, None, None], values, torch.zeros_like(values)
+    )
+    relative_dt = torch.where(
+        valid[:, None, None], relative_dt, torch.zeros_like(relative_dt)
+    )
+    return values.contiguous(), relative_dt.contiguous()
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -537,7 +633,7 @@ class NGADCanonicalDataset(Dataset):
                 or any(type(enabled) is not bool for enabled in elements)
             ):
                 raise ValueError(f"{path} element_mask[{key!r}] must be bool [20].")
-            if not field_mask[key] and any(elements):
+            if key == CANONICAL_STATE_KEY and not field_mask[key] and any(elements):
                 raise ValueError(
                     f"{path} marks {key} unavailable but enables some of its elements."
                 )
@@ -963,6 +1059,15 @@ class NGADCanonicalDataset(Dataset):
             requested = torch.unique(
                 torch.cat([source_frame_indices, state_lower, state_upper]), sorted=True
             )
+            if bool(meta["tactile_mask"].any().item()):
+                tactile_history_indices = _tactile_history_source_indices(
+                    source_frame_indices,
+                    episode_length=int(episode["length"]),
+                )
+                requested = torch.unique(
+                    torch.cat([requested, tactile_history_indices.reshape(-1)]),
+                    sorted=True,
+                )
         read_field_mask = meta["field_mask"]
         if self.video_only:
             read_field_mask = {
@@ -1010,15 +1115,12 @@ class NGADCanonicalDataset(Dataset):
             [rows[int(frame)][CANONICAL_STATE_KEY] for frame in state_upper.tolist()],
             dtype=torch.float32,
         ))
-        tactile_values = (
-            torch.as_tensor(current_row[CANONICAL_TACTILE_VALUES_KEY], dtype=torch.float32)
-            if meta["tactile_mask"][0]
-            else torch.zeros((4, 3, 25, 6), dtype=torch.float32)
-        )
-        tactile_dt = (
-            torch.as_tensor(current_row[CANONICAL_TACTILE_DT_KEY], dtype=torch.float32)
-            if meta["tactile_mask"][1]
-            else torch.zeros((4, 3), dtype=torch.float32)
+        tactile_values, tactile_dt = _build_tactile_history(
+            source_frame_indices=source_frame_indices,
+            episode_length=int(episode["length"]),
+            rows=rows,
+            tactile_mask=meta["tactile_mask"],
+            frame_valid=timeline.frame_valid,
         )
         absolute_state_grid = interpolate_canonical_tcp(
             lower_state, upper_state, state_fraction

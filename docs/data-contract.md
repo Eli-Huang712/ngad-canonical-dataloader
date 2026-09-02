@@ -89,8 +89,8 @@ Parquet/H.264 的可用图像必须声明为 RGB `video[256,256,3]`；物理缺�
 | 六路 `observation.images.*` | `image[256,256,3]` 或 `video[256,256,3]` | backend 对应的 RGB 图像；物理缺失由 mask 声明 |
 | `observation.state` | `float32[20]` | 双臂 absolute TCP，reshape 为 `[2,10]` |
 | `action` | `float32[20]` | Canonical schema 字段；训练监督不读取它，而是由 state window 重算 |
-| `observation.tactile.values` | `float32[4,3,25,6]` | 触觉值；可由 mask 声明缺失 |
-| `observation.tactile.dt` | `float32[4,3]` | 触觉时间差；可由 mask 声明缺失 |
+| `observation.tactile.values` | `float32[4,3,25,6]` | 每个源帧保存的触觉值；可由 mask 声明缺失 |
+| `observation.tactile.dt` | `float32[4,3]` | 每个源帧内触觉 packet 相对时间；可由 mask 声明缺失 |
 | `timestamp` | `float64[1]` | Episode 内物理时间 |
 | `frame_index` | `int64[1]` | Episode 内帧索引 |
 | `episode_index` | `int64[1]` | Episode 标识 |
@@ -122,8 +122,9 @@ tactile 标记为无效，row backend 不会读取这些字段。Canonical mode 
 
 各 table 的原始 `meta/stats.json` 不是正式时间轴上重构的 anchor-relative Action
 统计，也不符合当前 normalization schema；必须先生成正式的 `table_NNN.json`。
-Action 统计尚未准备好时，`action_xyz_scale` 只能使用占位值，并且 Action field/element mask
-必须全部关闭。
+Action 统计尚未准备好时，`action_xyz_scale` 只能使用占位值，并且 Action element mask
+必须全部关闭。原始 Action 的 field mask 与推导监督的 element mask 相互独立：数据没有落盘
+Action 时 field mask 可以关闭；正式 relative-pose 统计完成后，element mask 按 State 可重建维度开启。
 
 `mask_and_mapping_path` 指向的 JSON 顶层必须严格为：
 
@@ -355,8 +356,8 @@ Canonical mode 另外返回：
     "action_feature_mask":           bool[128],
     "observation_state_element_mask": bool[20],
     "action_element_mask":           bool[20],
-    "observation.tactile.values":    float32[4, 3, 25, 6],
-    "observation.tactile.dt":        float32[4, 3],
+    "observation.tactile.values":    float32[N, 16, 4, 25, 6],
+    "observation.tactile.dt":        float32[N, 16, 4],
     "tactile_field_mask":            bool[2],
 }
 ```
@@ -367,6 +368,10 @@ feature/element mask。
 `video` 已从 `uint8[0,255]` 转为 `float32[-1,1]`。State 与 Action 共用
 `action_step_offsets[N,K]`、`action_timestamps[N,K]` 和 `action_valid[N,K]`，不重复输出
 另一套 State 时间 metadata。
+
+每个 tactile 输出时刻严格使用对应 RGB source frame 及其之前 source rows 中最近的
+16 个 packet；`observation.tactile.dt` 改写为每个 packet 相对该 RGB source frame 的时间差。
+Episode 左边界使用最早 source row 左填充，越过有效 RGB timeline 的输出整体置零。
 
 `data_info` 字段：
 
