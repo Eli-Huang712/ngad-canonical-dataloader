@@ -86,6 +86,7 @@ canonical: 上述字段 + state + action + action/feature/element mask
 - 将 RGB target 映射到真实 source frame；
 - 调用 table/image backend 读取并解码数据；
 - 组合 frame、camera、pixel mask、prompt 和 metadata；
+- video-only mode 不读取 sidecar 中无效的 State/tactile 字段；
 - 仅在 canonical mode 为高频 state 生成插值 bracket，并构造 absolute State、
   fixed-anchor relative Action、normalization、TCP128 和对应 mask；
 - 返回稳定的单样本 ABI。

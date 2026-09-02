@@ -57,7 +57,7 @@ action : [81,2,128]
 
 `normalization_stats_path` 是必填全局字段。非空路径进入 canonical mode；设为 `null` 时
 进入临时的 video-only mode，只加载真实 video/mask/prompt/frame metadata，不读取统计量，
-也不生成 state/action、dummy stats 或伪造 TCP128。
+也不读取 sidecar 中无效的 state/tactile，不生成 state/action、dummy stats 或伪造 TCP128。
 
 ### 2. 构造 Dataset
 

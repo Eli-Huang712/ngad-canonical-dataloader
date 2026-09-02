@@ -116,6 +116,10 @@ Parquet/H.264 的可用图像必须声明为 RGB `video[256,256,3]`；物理缺�
 - `null`：video-only mode。不读取 normalization 文件，不创建 TCP transform，不插值或
   normalization state/action，也不生成 dummy stats 或伪造 TCP128。
 
+Video-only 只读取图像构造所需的 identity metadata；sidecar 可以将 State、Action 和
+tactile 标记为无效，row backend 不会读取这些字段。Canonical mode 仍严格要求有效 State，
+并由 State 重建 Action。
+
 各 table 的原始 `meta/stats.json` 不是正式时间轴上重构的 anchor-relative Action 统计，
 禁止直接作为 canonical global normalization 输入。
 

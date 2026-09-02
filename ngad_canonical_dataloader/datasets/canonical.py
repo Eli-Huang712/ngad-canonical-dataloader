@@ -474,7 +474,9 @@ class NGADCanonicalDataset(Dataset):
             )
         if any(type(enabled) is not bool for enabled in field_mask.values()):
             raise TypeError(f"{path} field_mask values must be bool.")
-        required_fields = {CANONICAL_STATE_KEY, *CANONICAL_IDENTITY_KEYS}
+        required_fields = set(CANONICAL_IDENTITY_KEYS)
+        if not self.video_only:
+            required_fields.add(CANONICAL_STATE_KEY)
         disabled_required = sorted(key for key in required_fields if not field_mask[key])
         if disabled_required:
             raise ValueError(
@@ -920,10 +922,18 @@ class NGADCanonicalDataset(Dataset):
             requested = torch.unique(
                 torch.cat([source_frame_indices, state_lower, state_upper]), sorted=True
             )
+        read_field_mask = meta["field_mask"]
+        if self.video_only:
+            read_field_mask = {
+                **read_field_mask,
+                CANONICAL_STATE_KEY: False,
+                CANONICAL_TACTILE_VALUES_KEY: False,
+                CANONICAL_TACTILE_DT_KEY: False,
+            }
         rows = meta["table_backend"].read_rows(
             episode,
             requested,
-            meta["field_mask"],
+            read_field_mask,
             meta["field_mapping"],
             self.camera_keys,
             meta["camera_mask"],

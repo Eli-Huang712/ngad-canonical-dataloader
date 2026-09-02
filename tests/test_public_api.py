@@ -293,6 +293,7 @@ def test_canonical_sidecar_produces_tensor_masks(tmp_path) -> None:
 
     dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
     dataset.camera_keys = CANONICAL_CAMERA_KEYS
+    dataset.video_only = False
     contract = dataset._load_mask_and_mapping_contract(manifest_path, "libero")
     pixel_mask = dataset._load_pixel_mask(contract)
 
@@ -373,6 +374,7 @@ def test_field_mapping_rejects_disabled_canonical_fields(tmp_path) -> None:
     )
     dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
     dataset.camera_keys = CANONICAL_CAMERA_KEYS
+    dataset.video_only = False
     with pytest.raises(ValueError, match="contains disabled fields"):
         dataset._load_mask_and_mapping_contract(path, "invalid")
 
@@ -398,6 +400,8 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
     features = {
         "observation.state": {"shape": [20]},
         "action": {"shape": [20]},
+        CANONICAL_TACTILE_VALUES_KEY: {"shape": [4, 3, 25, 6]},
+        CANONICAL_TACTILE_DT_KEY: {"shape": [4, 3]},
         "timestamp": {"shape": [1]},
         "frame_index": {"shape": [1]},
         "episode_index": {"shape": [1]},
@@ -474,6 +478,8 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
         encoding="utf-8",
     )
 
+    read_field_masks = []
+
     class FakeTableBackend:
         def read_catalog(self, camera_keys, camera_mask, field_mapping):
             del camera_keys, camera_mask, field_mapping
@@ -495,7 +501,8 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
             camera_keys,
             camera_mask,
         ):
-            del episode, field_mask, field_mapping, camera_keys, camera_mask
+            del episode, field_mapping, camera_keys, camera_mask
+            read_field_masks.append(dict(field_mask))
             rows = {}
             for frame in sorted({0, *relative_indices.tolist()}):
                 tcp10 = [
@@ -510,14 +517,16 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
                     0.0,
                     0.5,
                 ]
-                rows[frame] = {
+                row = {
                     "timestamp": frame / 10,
                     "frame_index": frame,
                     "episode_index": 0,
                     "index": frame,
                     "task_index": 0,
-                    "observation.state": tcp10 + tcp10,
                 }
+                if field_mask["observation.state"]:
+                    row["observation.state"] = tcp10 + tcp10
+                rows[frame] = row
             return rows
 
     class FakeImageBackend:
@@ -601,12 +610,37 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
         "_normalization_transform",
         staticmethod(fail_normalization_transform),
     )
+    video_field_mask = dict(field_mask)
+    video_field_mask["observation.state"] = False
+    video_field_mask[CANONICAL_TACTILE_VALUES_KEY] = True
+    video_field_mask[CANONICAL_TACTILE_DT_KEY] = True
+    video_mask_path = tmp_path / "video_mask_and_mapping.json"
+    video_mask_path.write_text(
+        json.dumps(
+            {
+                "dataset": "synthetic",
+                "field_mapping": {},
+                "image_pixel_mask": {
+                    "path": "pixel_mask.npz",
+                    "key": "mask",
+                    "shape": [256, 256],
+                    "applies_to_all_available_images": True,
+                },
+                "field_mask": video_field_mask,
+                "element_mask": {
+                    "observation.state": [False] * 20,
+                    "action": [False] * 20,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     video_dataset = NGADCanonicalDataset(
         dataset_dirs=[
             {
                 "name": "synthetic",
                 "path": str(root),
-                "mask_and_mapping_path": str(mask_and_mapping_path),
+                "mask_and_mapping_path": str(video_mask_path),
             }
         ],
         normalization_stats_path=None,
@@ -634,5 +668,8 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
     assert video_sample["data_info"]["sample_mode"] == "video_only"
     assert video_dataset.normalization_stats() is None
     assert stats_reads == 1
+    assert read_field_masks[-1]["observation.state"] is False
+    assert read_field_masks[-1][CANONICAL_TACTILE_VALUES_KEY] is False
+    assert read_field_masks[-1][CANONICAL_TACTILE_DT_KEY] is False
     with pytest.raises(RuntimeError, match="video-only mode"):
         video_dataset.denormalize_action(torch.zeros(128))

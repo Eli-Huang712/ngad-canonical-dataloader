@@ -113,7 +113,7 @@ class LanceTableBackend:
             for relative_index in relative_indices.tolist()
         )
         offsets = sorted(offsets)
-        value_keys = [STATE_KEY]
+        value_keys = [STATE_KEY] if field_mask[STATE_KEY] else []
         value_keys.extend(key for key in TACTILE_KEYS if field_mask[key])
         value_keys.extend(
             camera
@@ -309,7 +309,9 @@ class ParquetTableBackend:
         if not local_rows or min(local_rows) < 0 or max(local_rows) >= row_group_ends[-1]:
             raise IndexError(f"LeRobot v3 episode offsets exceed their data shard: {episode}.")
 
-        canonical_columns = [*IDENTITY_KEYS, STATE_KEY]
+        canonical_columns = [*IDENTITY_KEYS]
+        if field_mask[STATE_KEY]:
+            canonical_columns.append(STATE_KEY)
         canonical_columns.extend(key for key in TACTILE_KEYS if field_mask[key])
         columns = list(
             dict.fromkeys(
