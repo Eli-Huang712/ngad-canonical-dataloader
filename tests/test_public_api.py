@@ -111,6 +111,72 @@ def test_storage_backend_factory_selects_only_supported_physical_pairs(tmp_path)
         create_storage_backends(tmp_path / "unknown", "table_002", {})
 
 
+def test_parquet_backend_uses_episode_offsets_with_noncontiguous_file_assignments(
+    tmp_path,
+) -> None:
+    root = tmp_path / "table_000"
+    (root / "meta" / "episodes").mkdir(parents=True)
+    (root / "data" / "chunk-000").mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist([{"task_index": 0, "task": "test"}]),
+        root / "meta" / "tasks.parquet",
+    )
+    episodes = [
+        {
+            "episode_index": episode_index,
+            "tasks": ["test"],
+            "length": 2,
+            "data/chunk_index": 0,
+            "data/file_index": file_index,
+            "dataset_from_index": episode_index * 2,
+            "dataset_to_index": episode_index * 2 + 2,
+        }
+        for episode_index, file_index in ((0, 0), (1, 1), (2, 0))
+    ]
+    pq.write_table(
+        pa.Table.from_pylist(episodes),
+        root / "meta" / "episodes" / "file-000.parquet",
+    )
+    for file_index, episode_indices in ((0, (0, 2)), (1, (1,))):
+        rows = [
+            {
+                "index": episode_index * 2 + frame_index,
+                "episode_index": episode_index,
+                "frame_index": frame_index,
+                "task_index": 0,
+                "timestamp": float(frame_index),
+            }
+            for episode_index in episode_indices
+            for frame_index in range(2)
+        ]
+        pq.write_table(
+            pa.Table.from_pylist(rows),
+            root / "data" / "chunk-000" / f"file-{file_index:03d}.parquet",
+        )
+
+    backend = ParquetTableBackend(
+        root,
+        {"data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"},
+    )
+    _, catalog = backend.read_catalog((), torch.zeros(0, dtype=torch.bool), {})
+    rows = backend.read_rows(
+        catalog[2],
+        torch.tensor([0, 1]),
+        {
+            "observation.state": False,
+            CANONICAL_TACTILE_VALUES_KEY: False,
+            CANONICAL_TACTILE_DT_KEY: False,
+        },
+        {},
+        (),
+        torch.zeros(0, dtype=torch.bool),
+    )
+
+    assert rows[0]["index"] == 4
+    assert rows[1]["index"] == 5
+    assert rows[0]["episode_index"] == 2
+
+
 def test_dataset_root_discovers_direct_tables_in_numeric_order(tmp_path) -> None:
     table_root = tmp_path / "table_000"
     (table_root / "meta").mkdir(parents=True)
