@@ -538,6 +538,26 @@ def test_canonical_video_preparation_only_normalizes_fixed_uint8_frames() -> Non
         dataset._prepare_video(torch.zeros((2, 3, 224, 224), dtype=torch.uint8))
 
 
+def test_canonical_timestamps_accept_physical_jitter_but_require_order() -> None:
+    dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
+    episode = {"episode_index": 7}
+
+    dataset._validate_sample_timestamps(
+        episode,
+        torch.tensor([0.0, 0.0332, 0.0667, 0.1333], dtype=torch.float64),
+    )
+    with pytest.raises(ValueError, match="not strictly increasing"):
+        dataset._validate_sample_timestamps(
+            episode,
+            torch.tensor([0.0, 0.0332, 0.0332], dtype=torch.float64),
+        )
+    with pytest.raises(ValueError, match="not finite"):
+        dataset._validate_sample_timestamps(
+            episode,
+            torch.tensor([0.0, float("nan")], dtype=torch.float64),
+        )
+
+
 def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> None:
     root = tmp_path / "canonical"
     table_root = root / "table_000"

@@ -892,22 +892,16 @@ class NGADCanonicalDataset(Dataset):
     def _validate_sample_timestamps(
         self,
         episode: dict[str, int],
-        source_indices: torch.Tensor,
         actual_timestamps: torch.Tensor,
-        timestamp_start: torch.Tensor,
     ) -> None:
-        """Check source rows against their declared uniform episode timeline."""
-        source_fps = self._root_meta[episode["root_index"]]["source_fps"]
+        """Check selected physical source timestamps are finite and ordered."""
+        if not torch.isfinite(actual_timestamps).all():
+            raise ValueError(
+                f"Canonical timestamps are not finite in episode {episode['episode_index']}."
+            )
         if actual_timestamps.numel() > 1 and torch.any(torch.diff(actual_timestamps) <= 0):
             raise ValueError(
                 f"Canonical timestamps are not strictly increasing in episode {episode['episode_index']}."
-            )
-        expected = timestamp_start + source_indices.to(torch.float64) / source_fps
-        tolerance = 1.0e-4
-        if torch.any(torch.abs(actual_timestamps - expected) > tolerance):
-            raise ValueError(
-                f"Canonical source timestamps do not match the declared fps in "
-                f"episode {episode['episode_index']}."
             )
 
     def _prepare_video(self, video: torch.Tensor) -> torch.Tensor:
@@ -1090,9 +1084,7 @@ class NGADCanonicalDataset(Dataset):
         ).reshape(-1)
         self._validate_sample_timestamps(
             episode,
-            requested,
             source_timestamps,
-            torch.as_tensor(rows[0]["timestamp"], dtype=torch.float64).reshape(()),
         )
         current_row = rows[int(anchor_source_index.item())]
         sample = self._build_video_sample(
