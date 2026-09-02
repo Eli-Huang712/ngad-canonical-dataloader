@@ -15,8 +15,6 @@ GPU transfer、Tokenizer、VAE、flow construction 和模型不在本仓库范�
 ### 1. 配置数据集和统一时间轴
 
 ```yaml
-schema_version: ngad_canonical_dataloader_v2
-
 dataset:
   normalization_stats_path: /path/to/stats/canonical_global_normalization.json
 

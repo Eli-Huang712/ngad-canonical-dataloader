@@ -108,3 +108,10 @@ table-local row offset 读取，并完成真实数据 DataLoader smoke test。
 - 数据 root 没有生产用 `mask_and_mapping`、pixel mask 和兼容当前 TCP transform 的 mixed
   normalization stats。本次 smoke 使用 jhhuang 运行目录中的 diagnostic-only sidecar；
   它们不能用于训练。
+
+## 删除开发阶段 YAML schema version
+
+- 修改目的：开发阶段不维护 YAML schema version，也不保留旧配置兼容入口。
+- 配置顶层现在严格只接受 `dataset`；出现 `schema_version` 或其他顶层字段立即报错。
+- 删除 `CONFIG_SCHEMA_VERSION`，同步更新仓库示例、README 和 YAML 配置测试。
+- normalization stats JSON 自身的 `schema_version` 属于 TCP 数值合同，本次不修改。

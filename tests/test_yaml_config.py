@@ -3,7 +3,6 @@ from pathlib import Path
 import pytest
 
 from ngad_canonical_dataloader.config import (
-    CONFIG_SCHEMA_VERSION,
     DatasetConfig,
     DatasetRootConfig,
     TimelineConfig,
@@ -14,7 +13,6 @@ from ngad_canonical_dataloader.config import (
 def test_example_yaml_matches_the_strict_config_contract() -> None:
     path = Path(__file__).parents[1] / "configs" / "canonical.yaml"
     config = load_dataset_config(path)
-    assert CONFIG_SCHEMA_VERSION == "ngad_canonical_dataloader_v2"
     assert config.timeline.rgb_rate_hz == 10
     assert config.timeline.action_steps_per_rgb_frame == 2
     assert config.timeline.anchor_offset == 0
@@ -97,8 +95,7 @@ def test_global_normalization_is_required_and_forwarded() -> None:
 def test_null_global_normalization_round_trips_as_video_only(tmp_path) -> None:
     path = tmp_path / "video-only.yaml"
     path.write_text(
-        """schema_version: ngad_canonical_dataloader_v2
-dataset:
+        """dataset:
   normalization_stats_path: null
   dataset_dirs:
     - name: hy_table_000
@@ -118,3 +115,16 @@ dataset:
 
     assert config.normalization_stats_path is None
     assert config.to_dataset_kwargs()["normalization_stats_path"] is None
+
+
+def test_schema_version_is_rejected_without_compatibility(tmp_path) -> None:
+    path = tmp_path / "versioned.yaml"
+    path.write_text(
+        """schema_version: ngad_canonical_dataloader_v2
+dataset: {}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="exactly dataset"):
+        load_dataset_config(path)

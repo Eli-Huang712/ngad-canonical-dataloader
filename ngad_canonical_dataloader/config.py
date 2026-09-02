@@ -11,9 +11,6 @@ import yaml
 from ngad_canonical_dataloader.datasets.canonical import NGADCanonicalDataset
 
 
-CONFIG_SCHEMA_VERSION = "ngad_canonical_dataloader_v2"
-
-
 @dataclass(frozen=True)
 class TimelineConfig:
     """One anchor-relative RGB grid with an integer action substep axis."""
@@ -149,17 +146,12 @@ class DatasetConfig:
 
 
 def load_dataset_config(path: str | Path) -> DatasetConfig:
-    """Read and strictly validate one versioned YAML Dataset configuration."""
+    """Read and strictly validate one YAML Dataset configuration."""
     config_path = Path(path)
     with config_path.open(encoding="utf-8") as handle:
         value = yaml.safe_load(handle)
-    if not isinstance(value, dict) or set(value) != {"schema_version", "dataset"}:
-        raise ValueError("YAML root must contain exactly schema_version and dataset.")
-    if value["schema_version"] != CONFIG_SCHEMA_VERSION:
-        raise ValueError(
-            f"Expected schema_version={CONFIG_SCHEMA_VERSION!r}, "
-            f"got {value['schema_version']!r}."
-        )
+    if not isinstance(value, dict) or set(value) != {"dataset"}:
+        raise ValueError("YAML root must contain exactly dataset.")
     if not isinstance(value["dataset"], dict):
         raise TypeError("YAML dataset field must be a mapping.")
     return DatasetConfig.from_mapping(value["dataset"])
