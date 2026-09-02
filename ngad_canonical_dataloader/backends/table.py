@@ -155,7 +155,7 @@ class ParquetTableBackend:
     def __init__(self, root: Path, info: dict[str, Any]) -> None:
         self.root = root
         self.info = info
-        self._data_file_starts: dict[tuple[int, int], int] = {}
+        self._episode_file_starts: dict[tuple[int, int, int], int] = {}
         self._handles: dict[tuple[int, int], Any] = {}
         self._row_group_ends: dict[tuple[int, int], list[int]] = {}
         self._pid = os.getpid()
@@ -244,12 +244,20 @@ class ParquetTableBackend:
                     raise ValueError(
                         f"Invalid LeRobot v3 video range for {camera} in episode {episode_index}."
                     )
-            file_key = (episode["data_chunk_index"], episode["data_file_index"])
-            self._data_file_starts[file_key] = min(
-                self._data_file_starts.get(file_key, episode["dataset_from_index"]),
-                episode["dataset_from_index"],
-            )
             episodes.append(episode)
+        episodes_by_file: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        for episode in episodes:
+            file_key = (episode["data_chunk_index"], episode["data_file_index"])
+            episodes_by_file.setdefault(file_key, []).append(episode)
+        self._episode_file_starts = {}
+        for file_key, file_episodes in episodes_by_file.items():
+            file_row = 0
+            for episode in sorted(
+                file_episodes, key=lambda record: record["dataset_from_index"]
+            ):
+                episode_key = (*file_key, episode["episode_index"])
+                self._episode_file_starts[episode_key] = file_row
+                file_row += episode["length"]
         return tasks, sorted(episodes, key=lambda record: record["dataset_from_index"])
 
     def _data_file(self, episode: dict[str, Any]):
@@ -300,9 +308,11 @@ class ParquetTableBackend:
         requested = {0}
         requested.update(int(index) for index in relative_indices.tolist())
         file_key = (episode["data_chunk_index"], episode["data_file_index"])
-        file_start = self._data_file_starts[file_key]
+        episode_file_start = self._episode_file_starts[
+            (*file_key, episode["episode_index"])
+        ]
         local_rows = {
-            episode["dataset_from_index"] + relative_index - file_start: relative_index
+            episode_file_start + relative_index: relative_index
             for relative_index in requested
         }
         parquet_file, row_group_ends = self._data_file(episode)

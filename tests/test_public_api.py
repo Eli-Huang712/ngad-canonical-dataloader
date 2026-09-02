@@ -111,6 +111,72 @@ def test_storage_backend_factory_selects_only_supported_physical_pairs(tmp_path)
         create_storage_backends(tmp_path / "unknown", "table_002", {})
 
 
+def test_parquet_backend_uses_episode_offsets_with_noncontiguous_file_assignments(
+    tmp_path,
+) -> None:
+    root = tmp_path / "table_000"
+    (root / "meta" / "episodes").mkdir(parents=True)
+    (root / "data" / "chunk-000").mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist([{"task_index": 0, "task": "test"}]),
+        root / "meta" / "tasks.parquet",
+    )
+    episodes = [
+        {
+            "episode_index": episode_index,
+            "tasks": ["test"],
+            "length": 2,
+            "data/chunk_index": 0,
+            "data/file_index": file_index,
+            "dataset_from_index": episode_index * 2,
+            "dataset_to_index": episode_index * 2 + 2,
+        }
+        for episode_index, file_index in ((0, 0), (1, 1), (2, 0))
+    ]
+    pq.write_table(
+        pa.Table.from_pylist(episodes),
+        root / "meta" / "episodes" / "file-000.parquet",
+    )
+    for file_index, episode_indices in ((0, (0, 2)), (1, (1,))):
+        rows = [
+            {
+                "index": episode_index * 2 + frame_index,
+                "episode_index": episode_index,
+                "frame_index": frame_index,
+                "task_index": 0,
+                "timestamp": float(frame_index),
+            }
+            for episode_index in episode_indices
+            for frame_index in range(2)
+        ]
+        pq.write_table(
+            pa.Table.from_pylist(rows),
+            root / "data" / "chunk-000" / f"file-{file_index:03d}.parquet",
+        )
+
+    backend = ParquetTableBackend(
+        root,
+        {"data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"},
+    )
+    _, catalog = backend.read_catalog((), torch.zeros(0, dtype=torch.bool), {})
+    rows = backend.read_rows(
+        catalog[2],
+        torch.tensor([0, 1]),
+        {
+            "observation.state": False,
+            CANONICAL_TACTILE_VALUES_KEY: False,
+            CANONICAL_TACTILE_DT_KEY: False,
+        },
+        {},
+        (),
+        torch.zeros(0, dtype=torch.bool),
+    )
+
+    assert rows[0]["index"] == 4
+    assert rows[1]["index"] == 5
+    assert rows[0]["episode_index"] == 2
+
+
 def test_dataset_root_discovers_direct_tables_in_numeric_order(tmp_path) -> None:
     table_root = tmp_path / "table_000"
     (table_root / "meta").mkdir(parents=True)
@@ -411,6 +477,55 @@ def test_field_mapping_rejects_disabled_canonical_fields(tmp_path) -> None:
         dataset._load_mask_and_mapping_contract(path, "invalid")
 
 
+def test_relative_action_mask_does_not_require_a_physical_action_field(tmp_path) -> None:
+    np.savez(tmp_path / "pixel_mask.npz", mask=np.ones((256, 256), dtype=np.bool_))
+    field_mask = {
+        camera: camera == CANONICAL_CAMERA_KEYS[0] for camera in CANONICAL_CAMERA_KEYS
+    }
+    field_mask.update(
+        {
+            "observation.state": True,
+            "action": False,
+            CANONICAL_TACTILE_VALUES_KEY: True,
+            CANONICAL_TACTILE_DT_KEY: True,
+            "timestamp": True,
+            "frame_index": True,
+            "episode_index": True,
+            "index": True,
+            "task_index": True,
+        }
+    )
+    path = tmp_path / "mask_and_mapping.json"
+    path.write_text(
+        json.dumps(
+            {
+                "dataset": "derived-action",
+                "field_mapping": {},
+                "field_mask": field_mask,
+                "element_mask": {
+                    "observation.state": [True] * 9 + [False] + [True] * 9 + [False],
+                    "action": [True] * 9 + [False] + [True] * 9 + [False],
+                },
+                "image_pixel_mask": {
+                    "path": "pixel_mask.npz",
+                    "key": "mask",
+                    "shape": [256, 256],
+                    "applies_to_all_available_images": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
+    dataset.camera_keys = CANONICAL_CAMERA_KEYS
+    dataset.video_only = False
+
+    contract = dataset._load_mask_and_mapping_contract(path, "derived-action")
+
+    assert not contract["field_mask"]["action"]
+    assert contract["action_element_mask"].sum().item() == 18
+
+
 def test_canonical_video_preparation_only_normalizes_fixed_uint8_frames() -> None:
     dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
     video = torch.zeros((2, 3, 256, 256), dtype=torch.uint8)
@@ -421,6 +536,26 @@ def test_canonical_video_preparation_only_normalizes_fixed_uint8_frames() -> Non
 
     with pytest.raises(ValueError, match=r"uint8 \[T,3,256,256\]"):
         dataset._prepare_video(torch.zeros((2, 3, 224, 224), dtype=torch.uint8))
+
+
+def test_canonical_timestamps_accept_physical_jitter_but_require_order() -> None:
+    dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
+    episode = {"episode_index": 7}
+
+    dataset._validate_sample_timestamps(
+        episode,
+        torch.tensor([0.0, 0.0332, 0.0667, 0.1333], dtype=torch.float64),
+    )
+    with pytest.raises(ValueError, match="not strictly increasing"):
+        dataset._validate_sample_timestamps(
+            episode,
+            torch.tensor([0.0, 0.0332, 0.0332], dtype=torch.float64),
+        )
+    with pytest.raises(ValueError, match="not finite"):
+        dataset._validate_sample_timestamps(
+            episode,
+            torch.tensor([0.0, float("nan")], dtype=torch.float64),
+        )
 
 
 def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> None:
@@ -467,8 +602,8 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
         {
             "observation.state": True,
             "action": True,
-            CANONICAL_TACTILE_VALUES_KEY: False,
-            CANONICAL_TACTILE_DT_KEY: False,
+            CANONICAL_TACTILE_VALUES_KEY: True,
+            CANONICAL_TACTILE_DT_KEY: True,
             "timestamp": True,
             "frame_index": True,
             "episode_index": True,
@@ -560,6 +695,14 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
                 }
                 if field_mask["observation.state"]:
                     row["observation.state"] = tcp10 + tcp10
+                if field_mask[CANONICAL_TACTILE_VALUES_KEY]:
+                    row[CANONICAL_TACTILE_VALUES_KEY] = torch.full(
+                        (4, 3, 25, 6), float(frame), dtype=torch.float32
+                    )
+                if field_mask[CANONICAL_TACTILE_DT_KEY]:
+                    row[CANONICAL_TACTILE_DT_KEY] = torch.tensor(
+                        [[-0.03, -0.02, -0.01]] * 4, dtype=torch.float32
+                    )
                 rows[frame] = row
             return rows
 
@@ -618,6 +761,14 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
     assert sample["camera_mask"].shape == (3, 6)
     assert sample["image_pixel_mask"].shape == (3, 6, 256, 256)
     assert sample["state_feature_mask"].shape == (128,)
+    assert sample[CANONICAL_TACTILE_VALUES_KEY].shape == (3, 16, 4, 25, 6)
+    assert sample[CANONICAL_TACTILE_DT_KEY].shape == (3, 16, 4)
+    assert sample["tactile_field_mask"].tolist() == [True, True]
+    assert torch.all(sample[CANONICAL_TACTILE_VALUES_KEY][1, -3:] == 2.0)
+    torch.testing.assert_close(
+        sample[CANONICAL_TACTILE_DT_KEY][1, -3:, 0],
+        torch.tensor([-0.03, -0.02, -0.01]),
+    )
     assert "anchor_state" not in sample
     assert "anchor_state_feature_mask" not in sample
     torch.testing.assert_close(
