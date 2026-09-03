@@ -185,9 +185,11 @@ fragment、shard、`.work` 或 `.publishing` 等旧拓扑。
 YAML 只配置一个 table，再由训练侧依次加载。Dataset 不在训练时统计，也不直接接受各 table
 的原始 `meta/stats.json`。
 
-正式 normalization stats 必须同时包含 `state_xyz_min[2,3]`、`state_xyz_max[2,3]`、
-`action_xyz_scale[2,3]`、`gripper_open_value[2]` 和 `gripper_closed_value[2]`，不提供旧 stats
-fallback。夹爪按 `(value-closed)/(open-closed)` 转成 `[0,1]` openness。
+正式 normalization stats 使用 `ngad_canonical_tcp_v2`，必须同时包含
+`state_tcp_mean/std[2,9]`、`action_tcp_mean/std[2,9]`、`gripper_open_value[2]`
+和 `gripper_closed_value[2]`，不提供旧 stats fallback。每臂前 9 维 XYZ+Rot6D
+使用 z-score；夹爪按 `(value-closed)/(open-closed)` 转成 `[0,1]` openness，
+不参与 z-score。落盘 Action 不参与读取或监督，模型 Action 始终由 absolute State 重建。
 
 物理目录拓扑、mask JSON、时间轴、插值、relative pose、normalization 和 TCP128D 规划见
 [Canonical Data Contract](docs/data-contract.md)。

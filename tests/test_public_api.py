@@ -26,10 +26,23 @@ from ngad_canonical_dataloader.windows import (
     build_timeline_layout,
     timeline_sample_indices,
 )
+from ngad_canonical_dataloader.statistics import RunningMoments
 
 
 def test_dataset_classes_are_importable() -> None:
     assert NGADCanonicalDataset.__name__ == "NGADCanonicalDataset"
+
+
+def test_running_moments_matches_population_zscore_statistics() -> None:
+    moments = RunningMoments((2, 9))
+    first = torch.arange(36, dtype=torch.float64).reshape(2, 2, 9)
+    second = torch.arange(36, 72, dtype=torch.float64).reshape(2, 2, 9)
+    moments.update(first, torch.ones_like(first, dtype=torch.bool))
+    moments.update(second, torch.ones_like(second, dtype=torch.bool))
+    result = moments.result(1.0e-5)
+    expected = torch.cat([first, second], dim=0)
+    torch.testing.assert_close(result["mean"], expected.mean(dim=0))
+    torch.testing.assert_close(result["raw_std"], expected.std(dim=0, correction=0))
 
 
 def test_hy_gripper_values_map_to_canonical_openness() -> None:
@@ -38,8 +51,8 @@ def test_hy_gripper_values_map_to_canonical_openness() -> None:
     tcp[:, 19] = torch.tensor([90.0, 45.0, 0.0])
     normalized = normalize_dual_arm_absolute_tcp(
         tcp,
-        torch.zeros(2, 3),
-        torch.ones(2, 3),
+        torch.zeros(2, 9),
+        torch.ones(2, 9),
         torch.tensor([0.0, 0.0]),
         torch.tensor([90.0, 90.0]),
     )
@@ -52,10 +65,11 @@ def test_normalization_stats_require_gripper_endpoints() -> None:
     with pytest.raises(ValueError, match="gripper_closed_value.*gripper_open_value"):
         NGADCanonicalDataset._normalization_transform(
             {
-                "schema_version": "ngad_canonical_tcp_v1",
-                "state_xyz_min": [[-1, -1, -1], [-1, -1, -1]],
-                "state_xyz_max": [[1, 1, 1], [1, 1, 1]],
-                "action_xyz_scale": [[1, 1, 1], [1, 1, 1]],
+                "schema_version": "ngad_canonical_tcp_v2",
+                "state_tcp_mean": [[0] * 9, [0] * 9],
+                "state_tcp_std": [[1] * 9, [1] * 9],
+                "action_tcp_mean": [[0] * 9, [0] * 9],
+                "action_tcp_std": [[1] * 9, [1] * 9],
             }
         )
 
@@ -547,10 +561,11 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
     stats_path.write_text(
         json.dumps(
             {
-                "schema_version": "ngad_canonical_tcp_v1",
-                "state_xyz_min": [[-1, -1, -1], [-1, -1, -1]],
-                "state_xyz_max": [[1, 1, 1], [1, 1, 1]],
-                "action_xyz_scale": [[1, 1, 1], [1, 1, 1]],
+                "schema_version": "ngad_canonical_tcp_v2",
+                "state_tcp_mean": [[0] * 9, [0] * 9],
+                "state_tcp_std": [[1] * 9, [1] * 9],
+                "action_tcp_mean": [[0] * 9, [0] * 9],
+                "action_tcp_std": [[1] * 9, [1] * 9],
                 "gripper_open_value": [1, 1],
                 "gripper_closed_value": [0, 0],
             }
@@ -679,6 +694,7 @@ def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> No
     assert "normalization_id" not in sample["data_info"]
     assert stats_reads == 1
     assert dataset.normalization_stats() == json.loads(stats_path.read_text())
+    assert read_field_masks[-1]["action"] is False
     with pytest.raises(TypeError):
         dataset.denormalize_action(torch.zeros(128), "synthetic")
 

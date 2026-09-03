@@ -108,13 +108,22 @@ TCP_FEATURE_DIM = 10
 DUAL_ARM_TCP_FEATURE_DIM = 2 * TCP_FEATURE_DIM
 
 
-def minmax_normalize(value: torch.Tensor, minimum: torch.Tensor, maximum: torch.Tensor) -> torch.Tensor:
-    """Normalize featurewise values to ``[-1, 1]`` with stable constant dimensions."""
-    value_range = maximum - minimum
-    stable_range = torch.where(value_range < 1e-4, torch.full_like(value_range, 2.0), value_range)
-    normalized = 2.0 * (value - minimum) / stable_range - 1.0
-    normalized = torch.where(value_range < 1e-4, value - minimum, normalized)
-    return normalized.clamp(-5.0, 5.0)
+def zscore_normalize(
+    value: torch.Tensor,
+    mean: torch.Tensor,
+    standard_deviation: torch.Tensor,
+) -> torch.Tensor:
+    """Apply a featurewise z-score using prevalidated non-zero deviations."""
+    return (value - mean) / standard_deviation
+
+
+def zscore_denormalize(
+    value: torch.Tensor,
+    mean: torch.Tensor,
+    standard_deviation: torch.Tensor,
+) -> torch.Tensor:
+    """Invert a featurewise z-score."""
+    return value * standard_deviation + mean
 
 
 def normalize_gripper_openness(
@@ -179,57 +188,55 @@ def tcp_relative_to_absolute(anchor: torch.Tensor, relative: torch.Tensor) -> to
     )
 
 
-def normalize_absolute_tcp(
+def normalize_tcp_pose(
     tcp: torch.Tensor,
-    xyz_minimum: torch.Tensor,
-    xyz_maximum: torch.Tensor,
+    pose_mean: torch.Tensor,
+    pose_std: torch.Tensor,
 ) -> torch.Tensor:
-    """Normalize absolute xyz while preserving Rot6D and absolute openness."""
+    """Z-score TCP XYZ+Rot6D while preserving canonical absolute openness."""
     normalized = tcp.clone()
-    normalized[..., :3] = minmax_normalize(tcp[..., :3], xyz_minimum, xyz_maximum)
+    normalized[..., :9] = zscore_normalize(tcp[..., :9], pose_mean, pose_std)
     normalized[..., 9] = normalized[..., 9].clamp(0.0, 1.0)
     return normalized
 
 
-def normalize_relative_tcp(tcp: torch.Tensor, xyz_scale: torch.Tensor) -> torch.Tensor:
-    """Symmetrically scale fixed-anchor relative xyz around zero."""
-    normalized = tcp.clone()
-    normalized[..., :3] = tcp[..., :3] / xyz_scale.clamp_min(1.0e-6)
-    normalized[..., 9] = normalized[..., 9].clamp(0.0, 1.0)
-    return normalized
-
-
-def denormalize_relative_tcp(tcp: torch.Tensor, xyz_scale: torch.Tensor) -> torch.Tensor:
-    """Restore relative xyz in meters while keeping Rot6D and openness unchanged."""
+def denormalize_tcp_pose(
+    tcp: torch.Tensor,
+    pose_mean: torch.Tensor,
+    pose_std: torch.Tensor,
+) -> torch.Tensor:
+    """Restore TCP XYZ+Rot6D while keeping canonical openness unchanged."""
     denormalized = tcp.clone()
-    denormalized[..., :3] = tcp[..., :3] * xyz_scale
+    denormalized[..., :9] = zscore_denormalize(
+        tcp[..., :9], pose_mean, pose_std
+    )
     denormalized[..., 9] = denormalized[..., 9].clamp(0.0, 1.0)
     return denormalized
 
 
 def normalize_dual_arm_absolute_tcp(
     tcp: torch.Tensor,
-    xyz_minimum: torch.Tensor,
-    xyz_maximum: torch.Tensor,
+    pose_mean: torch.Tensor,
+    pose_std: torch.Tensor,
     gripper_open_value: torch.Tensor,
     gripper_closed_value: torch.Tensor,
 ) -> torch.Tensor:
-    """Normalize xyz and source gripper values independently for each arm."""
+    """Z-score absolute poses and canonicalize source grippers for each arm."""
     if (
         tcp.shape[-1] != DUAL_ARM_TCP_FEATURE_DIM
-        or xyz_minimum.shape != (2, 3)
-        or xyz_maximum.shape != (2, 3)
+        or pose_mean.shape != (2, 9)
+        or pose_std.shape != (2, 9)
         or gripper_open_value.shape != (2,)
         or gripper_closed_value.shape != (2,)
     ):
         raise ValueError(
-            "Dual-arm absolute normalization requires TCP20, [2,3] xyz stats, "
+            "Dual-arm absolute normalization requires TCP20, [2,9] pose stats, "
             "and [2] gripper endpoints."
         )
     normalized = torch.cat(
         [
-            normalize_absolute_tcp(tcp[..., :TCP_FEATURE_DIM], xyz_minimum[0], xyz_maximum[0]),
-            normalize_absolute_tcp(tcp[..., TCP_FEATURE_DIM:], xyz_minimum[1], xyz_maximum[1]),
+            normalize_tcp_pose(tcp[..., :TCP_FEATURE_DIM], pose_mean[0], pose_std[0]),
+            normalize_tcp_pose(tcp[..., TCP_FEATURE_DIM:], pose_mean[1], pose_std[1]),
         ],
         dim=-1,
     )
@@ -241,25 +248,27 @@ def normalize_dual_arm_absolute_tcp(
 
 def normalize_dual_arm_relative_tcp(
     tcp: torch.Tensor,
-    xyz_scale: torch.Tensor,
+    pose_mean: torch.Tensor,
+    pose_std: torch.Tensor,
     gripper_open_value: torch.Tensor,
     gripper_closed_value: torch.Tensor,
 ) -> torch.Tensor:
-    """Normalize relative xyz and source gripper values for each arm."""
+    """Z-score relative poses and canonicalize target grippers for each arm."""
     if (
         tcp.shape[-1] != DUAL_ARM_TCP_FEATURE_DIM
-        or xyz_scale.shape != (2, 3)
+        or pose_mean.shape != (2, 9)
+        or pose_std.shape != (2, 9)
         or gripper_open_value.shape != (2,)
         or gripper_closed_value.shape != (2,)
     ):
         raise ValueError(
-            "Dual-arm relative normalization requires TCP20, [2,3] xyz scales, "
+            "Dual-arm relative normalization requires TCP20, [2,9] pose stats, "
             "and [2] gripper endpoints."
         )
     normalized = torch.cat(
         [
-            normalize_relative_tcp(tcp[..., :TCP_FEATURE_DIM], xyz_scale[0]),
-            normalize_relative_tcp(tcp[..., TCP_FEATURE_DIM:], xyz_scale[1]),
+            normalize_tcp_pose(tcp[..., :TCP_FEATURE_DIM], pose_mean[0], pose_std[0]),
+            normalize_tcp_pose(tcp[..., TCP_FEATURE_DIM:], pose_mean[1], pose_std[1]),
         ],
         dim=-1,
     )
@@ -269,14 +278,24 @@ def normalize_dual_arm_relative_tcp(
     return normalized
 
 
-def denormalize_dual_arm_relative_tcp(tcp: torch.Tensor, xyz_scale: torch.Tensor) -> torch.Tensor:
-    """Restore both arms' relative xyz from independent symmetric scales."""
-    if tcp.shape[-1] != DUAL_ARM_TCP_FEATURE_DIM or xyz_scale.shape != (2, 3):
-        raise ValueError("Dual-arm relative denormalization requires TCP20 and [2,3] xyz scales.")
+def denormalize_dual_arm_relative_tcp(
+    tcp: torch.Tensor,
+    pose_mean: torch.Tensor,
+    pose_std: torch.Tensor,
+) -> torch.Tensor:
+    """Restore both arms' relative XYZ+Rot6D from z-scores."""
+    if (
+        tcp.shape[-1] != DUAL_ARM_TCP_FEATURE_DIM
+        or pose_mean.shape != (2, 9)
+        or pose_std.shape != (2, 9)
+    ):
+        raise ValueError(
+            "Dual-arm relative denormalization requires TCP20 and [2,9] pose stats."
+        )
     return torch.cat(
         [
-            denormalize_relative_tcp(tcp[..., :TCP_FEATURE_DIM], xyz_scale[0]),
-            denormalize_relative_tcp(tcp[..., TCP_FEATURE_DIM:], xyz_scale[1]),
+            denormalize_tcp_pose(tcp[..., :TCP_FEATURE_DIM], pose_mean[0], pose_std[0]),
+            denormalize_tcp_pose(tcp[..., TCP_FEATURE_DIM:], pose_mean[1], pose_std[1]),
         ],
         dim=-1,
     )

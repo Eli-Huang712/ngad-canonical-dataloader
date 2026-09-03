@@ -37,7 +37,7 @@ from ngad_canonical_dataloader.windows import (
 )
 
 
-NGAD_CANONICAL_SCHEMA = "ngad_canonical_tcp_v1"
+NGAD_CANONICAL_SCHEMA = "ngad_canonical_tcp_v2"
 CANONICAL_CAMERA_KEYS = (
     "observation.images.cam_head_left",
     "observation.images.cam_head_right",
@@ -139,15 +139,17 @@ class CanonicalTCPTransform:
 
     def __init__(
         self,
-        state_xyz_min: torch.Tensor,
-        state_xyz_max: torch.Tensor,
-        action_xyz_scale: torch.Tensor,
+        state_tcp_mean: torch.Tensor,
+        state_tcp_std: torch.Tensor,
+        action_tcp_mean: torch.Tensor,
+        action_tcp_std: torch.Tensor,
         gripper_open_value: torch.Tensor,
         gripper_closed_value: torch.Tensor,
     ) -> None:
-        self.state_xyz_min = torch.as_tensor(state_xyz_min, dtype=torch.float32)
-        self.state_xyz_max = torch.as_tensor(state_xyz_max, dtype=torch.float32)
-        self.action_xyz_scale = torch.as_tensor(action_xyz_scale, dtype=torch.float32)
+        self.state_tcp_mean = torch.as_tensor(state_tcp_mean, dtype=torch.float32)
+        self.state_tcp_std = torch.as_tensor(state_tcp_std, dtype=torch.float32)
+        self.action_tcp_mean = torch.as_tensor(action_tcp_mean, dtype=torch.float32)
+        self.action_tcp_std = torch.as_tensor(action_tcp_std, dtype=torch.float32)
         self.gripper_open_value = torch.as_tensor(gripper_open_value, dtype=torch.float32)
         self.gripper_closed_value = torch.as_tensor(gripper_closed_value, dtype=torch.float32)
 
@@ -170,8 +172,8 @@ class CanonicalTCPTransform:
         feature_mask = element_mask_to_feature_mask(state_element_mask)
         normalized = normalize_dual_arm_absolute_tcp(
             self._flatten_state(absolute_state_targets),
-            self.state_xyz_min,
-            self.state_xyz_max,
+            self.state_tcp_mean,
+            self.state_tcp_std,
             self.gripper_open_value,
             self.gripper_closed_value,
         )
@@ -191,7 +193,8 @@ class CanonicalTCPTransform:
         relative = dual_arm_tcp_target_relative_to_anchor(anchor.unsqueeze(0), targets)
         normalized = normalize_dual_arm_relative_tcp(
             relative,
-            self.action_xyz_scale,
+            self.action_tcp_mean,
+            self.action_tcp_std,
             self.gripper_open_value,
             self.gripper_closed_value,
         )
@@ -203,7 +206,8 @@ class CanonicalTCPTransform:
         denormalized = torch.zeros_like(action)
         denormalized[..., :DUAL_ARM_TCP_FEATURE_DIM] = denormalize_dual_arm_relative_tcp(
             action[..., :DUAL_ARM_TCP_FEATURE_DIM],
-            self.action_xyz_scale.to(action.device, action.dtype),
+            self.action_tcp_mean.to(action.device, action.dtype),
+            self.action_tcp_std.to(action.device, action.dtype),
         )
         return denormalized
 
@@ -503,6 +507,10 @@ class NGADCanonicalDataset(Dataset):
                 f"{path} field_mapping contains non-canonical keys: "
                 f"{unknown_mapping_keys}."
             )
+        if CANONICAL_ACTION_KEY in field_mapping:
+            raise ValueError(
+                f"{path} must not map the derived Action field; Action is rebuilt from State."
+            )
         disabled_mapping_keys = sorted(
             key for key in field_mapping if not field_mask[key]
         )
@@ -674,7 +682,6 @@ class NGADCanonicalDataset(Dataset):
         """Validate mapped physical fields declared available by the sidecar."""
         expected = {
             CANONICAL_STATE_KEY: [20],
-            CANONICAL_ACTION_KEY: [20],
             CANONICAL_TACTILE_VALUES_KEY: [4, 3, 25, 6],
             CANONICAL_TACTILE_DT_KEY: [4, 3],
             "timestamp": [1],
@@ -725,9 +732,10 @@ class NGADCanonicalDataset(Dataset):
                 f"Expected normalization schema {NGAD_CANONICAL_SCHEMA}, got {stats.get('schema_version')}."
             )
         required_fields = {
-            "state_xyz_min",
-            "state_xyz_max",
-            "action_xyz_scale",
+            "state_tcp_mean",
+            "state_tcp_std",
+            "action_tcp_mean",
+            "action_tcp_std",
             "gripper_open_value",
             "gripper_closed_value",
         }
@@ -736,20 +744,22 @@ class NGADCanonicalDataset(Dataset):
             raise ValueError(
                 f"Canonical normalization is missing required fields: {missing_fields}."
             )
-        state_xyz_min = torch.tensor(stats["state_xyz_min"], dtype=torch.float32)
-        state_xyz_max = torch.tensor(stats["state_xyz_max"], dtype=torch.float32)
-        action_xyz_scale = torch.tensor(stats["action_xyz_scale"], dtype=torch.float32)
+        state_tcp_mean = torch.tensor(stats["state_tcp_mean"], dtype=torch.float32)
+        state_tcp_std = torch.tensor(stats["state_tcp_std"], dtype=torch.float32)
+        action_tcp_mean = torch.tensor(stats["action_tcp_mean"], dtype=torch.float32)
+        action_tcp_std = torch.tensor(stats["action_tcp_std"], dtype=torch.float32)
         gripper_open_value = torch.tensor(stats["gripper_open_value"], dtype=torch.float32)
         gripper_closed_value = torch.tensor(stats["gripper_closed_value"], dtype=torch.float32)
         for name, value in (
-            ("state_xyz_min", state_xyz_min),
-            ("state_xyz_max", state_xyz_max),
-            ("action_xyz_scale", action_xyz_scale),
+            ("state_tcp_mean", state_tcp_mean),
+            ("state_tcp_std", state_tcp_std),
+            ("action_tcp_mean", action_tcp_mean),
+            ("action_tcp_std", action_tcp_std),
         ):
-            if value.shape != (2, 3) or not torch.isfinite(value).all():
-                raise ValueError(f"Canonical normalization {name} must be finite [2,3].")
-        if torch.any(state_xyz_max <= state_xyz_min) or torch.any(action_xyz_scale <= 0):
-            raise ValueError("Canonical xyz normalization ranges must be positive.")
+            if value.shape != (2, 9) or not torch.isfinite(value).all():
+                raise ValueError(f"Canonical normalization {name} must be finite [2,9].")
+        if torch.any(state_tcp_std <= 0) or torch.any(action_tcp_std <= 0):
+            raise ValueError("Canonical TCP standard deviations must be positive.")
         if (
             gripper_open_value.shape != (2,)
             or gripper_closed_value.shape != (2,)
@@ -761,9 +771,10 @@ class NGADCanonicalDataset(Dataset):
                 "Canonical gripper open/closed values must be distinct finite [2] arrays."
             )
         return CanonicalTCPTransform(
-            state_xyz_min,
-            state_xyz_max,
-            action_xyz_scale,
+            state_tcp_mean,
+            state_tcp_std,
+            action_tcp_mean,
+            action_tcp_std,
             gripper_open_value,
             gripper_closed_value,
         )
@@ -963,7 +974,12 @@ class NGADCanonicalDataset(Dataset):
             requested = torch.unique(
                 torch.cat([source_frame_indices, state_lower, state_upper]), sorted=True
             )
-        read_field_mask = meta["field_mask"]
+        # Stored Action is never a physical input. The model-facing Action is
+        # reconstructed exclusively from the absolute State interpolation grid.
+        read_field_mask = {
+            **meta["field_mask"],
+            CANONICAL_ACTION_KEY: False,
+        }
         if self.video_only:
             read_field_mask = {
                 **read_field_mask,

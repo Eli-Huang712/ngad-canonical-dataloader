@@ -121,9 +121,8 @@ tactile 标记为无效，row backend 不会读取这些字段。Canonical mode 
 并由 State 重建 Action。
 
 各 table 的原始 `meta/stats.json` 不是正式时间轴上重构的 anchor-relative Action
-统计，也不符合当前 normalization schema；必须先生成正式的 `table_NNN.json`。
-Action 统计尚未准备好时，`action_xyz_scale` 只能使用占位值，并且 Action field/element mask
-必须全部关闭。
+统计，也不符合当前 normalization schema；必须用 state-only 离线统计入口生成正式的
+`table_NNN.json`。统计完成前 Action field/element mask 必须全部关闭。
 
 `mask_and_mapping_path` 指向的 JSON 顶层必须严格为：
 
@@ -147,6 +146,9 @@ Action 统计尚未准备好时，`action_xyz_scale` 只能使用占位值，并
 的字段禁止出现在 `field_mapping` 中；映射目标未出现在 table 的
 `meta/info.json.features` 时，Dataset 初始化立即报错。
 
+`action` 是唯一的派生字段：禁止出现在 `field_mapping`，row backend 永远不读取落盘
+Action。它的 `field_mask/element_mask` 只声明能否由 absolute State 重建模型监督。
+
 Lance backend 在实际取列时把映射后的 dotted physical key 转成 underscore column，例如
 `observation.images.cam_head` → `observation_images_cam_head`；LeRobot backend 直接用映射后的
 相机 key 解析 episode video metadata 和 `video_path`。
@@ -155,17 +157,18 @@ Lance backend 在实际取列时把映射后的 dotted physical key 转成 under
 不可用的相机输出黑图，同时 `camera_mask=False`、`image_pixel_mask=False`；不可用的 tactile
 字段输出零 tensor，同时对应 `tactile_field_mask=False`。
 
-Normalization JSON 使用 `ngad_canonical_tcp_v1` schema，并提供双臂独立的：
+Normalization JSON 使用 `ngad_canonical_tcp_v2` schema，并提供双臂独立的：
 
 ```text
-state_xyz_min:    [2,3]
-state_xyz_max:    [2,3]
-action_xyz_scale: [2,3]
+state_tcp_mean:  [2,9]
+state_tcp_std:   [2,9]
+action_tcp_mean: [2,9]
+action_tcp_std:  [2,9]
 gripper_open_value:   [2]
 gripper_closed_value: [2]
 ```
 
-五个字段都是必填项，不提供旧格式 fallback。Loader 使用
+六个字段都是必填项，不提供旧格式 fallback。每臂 9 维统计对应 XYZ+Rot6D。Loader 使用
 `(value - closed) / (open - closed)` 将源夹爪映射到 canonical openness `[0,1]`。HY 的
 `open=[0,0]`、`closed=[90,90]`，因此 `0/45/90` 映射为 `1/0.5/0`。
 
@@ -293,12 +296,13 @@ gripper_action = absolute_openness_t
 
 | 特征 | State | Action |
 |---|---|---|
-| XYZ | 每只手臂、每个轴按 min/max 映射到 `[-1,1]`；越界值最终 clamp 到 `[-5,5]` | 每只手臂、每个轴除以对称 `action_xyz_scale`；保持零中心，不做 `[-1,1]` clamp |
-| Rot6D | 不做统计归一化 | 不做统计归一化 |
+| XYZ | 每只手臂、每个轴使用离线 mean/std 做 z-score | 每只手臂、每个轴使用离线 mean/std 做 z-score |
+| Rot6D | 每只手臂、每个分量使用离线 mean/std 做 z-score | 每只手臂、每个分量使用离线 mean/std 做 z-score |
 | gripper openness | clamp 到 `[0,1]` | 保留目标 absolute openness，并 clamp 到 `[0,1]` |
 
-部署侧可以调用 `dataset.denormalize_action(action)`，使用唯一 global scale 把 Action
-TCP128 的 active relative XYZ 乘回物理尺度；Rot6D 和 openness 保持不变，保留槽位保持为零。
+部署侧可以调用 `dataset.denormalize_action(action)`，使用同一份 mean/std 恢复 Action
+TCP128 的 active relative XYZ+Rot6D；再将 Rot6D 投影成合法旋转矩阵。openness 保持不变，
+保留槽位保持为零。
 
 ### 5.4 TCP20 → TCP128D
 
