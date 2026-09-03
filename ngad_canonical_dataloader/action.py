@@ -108,6 +108,97 @@ TCP_FEATURE_DIM = 10
 DUAL_ARM_TCP_FEATURE_DIM = 2 * TCP_FEATURE_DIM
 
 
+def _minmax_normalize_v1(
+    value: torch.Tensor,
+    minimum: torch.Tensor,
+    maximum: torch.Tensor,
+) -> torch.Tensor:
+    """归一化旧 v1 数值；输入逐维上下界，输出稳定的 [-1,1] 特征。"""
+    value_range = maximum - minimum
+    stable_range = torch.where(
+        value_range < 1.0e-4,
+        torch.full_like(value_range, 2.0),
+        value_range,
+    )
+    normalized = 2.0 * (value - minimum) / stable_range - 1.0
+    normalized = torch.where(value_range < 1.0e-4, value - minimum, normalized)
+    return normalized.clamp(-5.0, 5.0)
+
+
+def normalize_dual_arm_absolute_tcp_v1(
+    tcp: torch.Tensor,
+    xyz_minimum: torch.Tensor,
+    xyz_maximum: torch.Tensor,
+    gripper_open_value: torch.Tensor,
+    gripper_closed_value: torch.Tensor,
+) -> torch.Tensor:
+    """归一化旧 v1 绝对 TCP；输入 TCP20/min/max，输出保留 Rot6D 的双臂特征。"""
+    if (
+        tcp.shape[-1] != DUAL_ARM_TCP_FEATURE_DIM
+        or xyz_minimum.shape != (2, 3)
+        or xyz_maximum.shape != (2, 3)
+        or gripper_open_value.shape != (2,)
+        or gripper_closed_value.shape != (2,)
+    ):
+        raise ValueError(
+            "v1 dual-arm absolute normalization requires TCP20, [2,3] xyz "
+            "stats, and [2] gripper endpoints."
+        )
+    normalized = tcp.clone()
+    normalized[..., :3] = _minmax_normalize_v1(
+        tcp[..., :3], xyz_minimum[0], xyz_maximum[0]
+    )
+    normalized[..., 10:13] = _minmax_normalize_v1(
+        tcp[..., 10:13], xyz_minimum[1], xyz_maximum[1]
+    )
+    normalized[..., [9, 19]] = normalize_gripper_openness(
+        tcp[..., [9, 19]], gripper_open_value, gripper_closed_value
+    )
+    return normalized
+
+
+def normalize_dual_arm_relative_tcp_v1(
+    tcp: torch.Tensor,
+    xyz_scale: torch.Tensor,
+    gripper_open_value: torch.Tensor,
+    gripper_closed_value: torch.Tensor,
+) -> torch.Tensor:
+    """归一化旧 v1 相对 TCP；输入 TCP20/xyz scale，输出对称缩放后的双臂特征。"""
+    if (
+        tcp.shape[-1] != DUAL_ARM_TCP_FEATURE_DIM
+        or xyz_scale.shape != (2, 3)
+        or gripper_open_value.shape != (2,)
+        or gripper_closed_value.shape != (2,)
+    ):
+        raise ValueError(
+            "v1 dual-arm relative normalization requires TCP20, [2,3] xyz "
+            "scales, and [2] gripper endpoints."
+        )
+    normalized = tcp.clone()
+    normalized[..., :3] = tcp[..., :3] / xyz_scale[0].clamp_min(1.0e-6)
+    normalized[..., 10:13] = tcp[..., 10:13] / xyz_scale[1].clamp_min(1.0e-6)
+    normalized[..., [9, 19]] = normalize_gripper_openness(
+        tcp[..., [9, 19]], gripper_open_value, gripper_closed_value
+    )
+    return normalized
+
+
+def denormalize_dual_arm_relative_tcp_v1(
+    tcp: torch.Tensor,
+    xyz_scale: torch.Tensor,
+) -> torch.Tensor:
+    """反归一化旧 v1 相对 TCP；输入缩放后的 TCP20，输出物理 xyz 与原 Rot6D。"""
+    if tcp.shape[-1] != DUAL_ARM_TCP_FEATURE_DIM or xyz_scale.shape != (2, 3):
+        raise ValueError(
+            "v1 dual-arm relative denormalization requires TCP20 and [2,3] xyz scales."
+        )
+    denormalized = tcp.clone()
+    denormalized[..., :3] = tcp[..., :3] * xyz_scale[0]
+    denormalized[..., 10:13] = tcp[..., 10:13] * xyz_scale[1]
+    denormalized[..., [9, 19]] = denormalized[..., [9, 19]].clamp(0.0, 1.0)
+    return denormalized
+
+
 def zscore_normalize(
     value: torch.Tensor,
     mean: torch.Tensor,

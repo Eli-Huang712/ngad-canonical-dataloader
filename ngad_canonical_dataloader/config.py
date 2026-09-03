@@ -172,11 +172,18 @@ class DatasetConfig:
 
 
 def load_dataset_config(path: str | Path) -> DatasetConfig:
-    """Read and strictly validate one YAML Dataset configuration."""
+    """读取数据配置；输入无版本或 PR21 v2 标记 YAML，输出严格 DatasetConfig。"""
     config_path = Path(path)
     with config_path.open(encoding="utf-8") as handle:
         value = yaml.safe_load(handle)
-    if not isinstance(value, dict) or set(value) != {"dataset"}:
+    if not isinstance(value, dict):
+        raise ValueError("YAML root must contain exactly dataset.")
+    if set(value) == {"schema_version", "dataset"}:
+        if value["schema_version"] != "ngad_canonical_dataloader_v2":
+            raise ValueError(
+                "YAML schema_version must be ngad_canonical_dataloader_v2."
+            )
+    elif set(value) != {"dataset"}:
         raise ValueError("YAML root must contain exactly dataset.")
     if not isinstance(value["dataset"], dict):
         raise TypeError("YAML dataset field must be a mapping.")
