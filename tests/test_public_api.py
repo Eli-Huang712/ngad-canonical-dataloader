@@ -91,6 +91,68 @@ def test_normalization_stats_require_gripper_endpoints() -> None:
         )
 
 
+def test_pr21_v1_normalization_stats_remain_replayable() -> None:
+    """输入 PR21 正式 v1 统计，输出旧 min-max/scale 数值与可逆相对 xyz。"""
+    transform = NGADCanonicalDataset._normalization_transform(
+        {
+            "schema_version": "ngad_canonical_tcp_v1",
+            "state_xyz_min": [[0, 0, 0], [10, 20, 30]],
+            "state_xyz_max": [[2, 4, 8], [12, 24, 38]],
+            "action_xyz_scale": [[2, 4, 8], [1, 2, 4]],
+            "gripper_open_value": [0, 0],
+            "gripper_closed_value": [10, 20],
+        }
+    )
+    state = torch.zeros(1, 2, 10)
+    state[0, 0, :3] = torch.tensor([1.0, 2.0, 4.0])
+    state[0, 1, :3] = torch.tensor([10.0, 22.0, 38.0])
+    state[0, :, 9] = torch.tensor([5.0, 20.0])
+
+    encoded, _ = transform.encode_state_targets(
+        state,
+        torch.ones(20, dtype=torch.bool),
+    )
+    torch.testing.assert_close(encoded[0, :3], torch.zeros(3))
+    torch.testing.assert_close(encoded[0, 10:13], torch.tensor([-1.0, 0.0, 1.0]))
+    torch.testing.assert_close(encoded[0, [9, 19]], torch.tensor([0.5, 0.0]))
+
+    normalized_action = torch.zeros(1, 128)
+    normalized_action[0, :3] = torch.tensor([0.5, -0.5, 1.0])
+    normalized_action[0, 10:13] = torch.tensor([1.0, -1.0, 0.5])
+    restored = transform.denormalize_action(normalized_action)
+    torch.testing.assert_close(restored[0, :3], torch.tensor([1.0, -2.0, 8.0]))
+    torch.testing.assert_close(restored[0, 10:13], torch.tensor([1.0, -2.0, 2.0]))
+
+
+def test_canonical_timestamps_accept_physical_jitter_but_require_order() -> None:
+    """输入偏离理想 FPS 的真实时间戳，输出接受结果；非有限或倒序仍失败。"""
+    dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
+    episode = {"episode_index": 7}
+    source_indices = torch.tensor([0, 1, 2, 4])
+    timestamp_start = torch.tensor(0.0, dtype=torch.float64)
+
+    dataset._validate_sample_timestamps(
+        episode,
+        source_indices,
+        torch.tensor([0.0, 0.0332, 0.0667, 0.1500], dtype=torch.float64),
+        timestamp_start,
+    )
+    with pytest.raises(ValueError, match="not strictly increasing"):
+        dataset._validate_sample_timestamps(
+            episode,
+            source_indices[:3],
+            torch.tensor([0.0, 0.0332, 0.0332], dtype=torch.float64),
+            timestamp_start,
+        )
+    with pytest.raises(ValueError, match="not finite"):
+        dataset._validate_sample_timestamps(
+            episode,
+            source_indices[:2],
+            torch.tensor([0.0, float("nan")], dtype=torch.float64),
+            timestamp_start,
+        )
+
+
 def test_fixed_canonical_abi_is_not_configurable() -> None:
     with pytest.raises(TypeError, match="target_rgb_fps"):
         NGADCanonicalDataset(

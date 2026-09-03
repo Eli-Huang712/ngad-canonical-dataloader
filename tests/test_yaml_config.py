@@ -118,14 +118,41 @@ def test_null_global_normalization_round_trips_as_video_only(tmp_path) -> None:
     assert config.to_dataset_kwargs()["normalization_stats_path"] is None
 
 
-def test_schema_version_is_rejected_without_compatibility(tmp_path) -> None:
+def test_pr21_schema_version_marker_is_accepted(tmp_path) -> None:
+    """输入 PR21 顶层 v2 标记，输出与无标记配置相同的严格配置对象。"""
     path = tmp_path / "versioned.yaml"
     path.write_text(
         """schema_version: ngad_canonical_dataloader_v2
+dataset:
+  normalization_stats_path: /data/stats.json
+  dataset_dirs:
+    - name: legacy
+      path: /data/legacy
+      mask_and_mapping_path: /data/legacy/mask.json
+  timeline:
+    rgb_rate_hz: 10
+    action_steps_per_rgb_frame: 2
+    anchor_offset: 0
+    frame_ranges:
+      - [0, 0]
+""",
+        encoding="utf-8",
+    )
+
+    config = load_dataset_config(path)
+
+    assert config.dataset_dirs[0].name == "legacy"
+
+
+def test_unknown_schema_version_marker_is_rejected(tmp_path) -> None:
+    """输入未知顶层版本，输出明确拒绝而不猜测兼容路径。"""
+    path = tmp_path / "unknown-version.yaml"
+    path.write_text(
+        """schema_version: ngad_canonical_dataloader_v3
 dataset: {}
 """,
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="exactly dataset"):
+    with pytest.raises(ValueError, match="ngad_canonical_dataloader_v2"):
         load_dataset_config(path)
