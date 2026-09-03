@@ -89,8 +89,8 @@ Parquet/H.264 的可用图像必须声明为 RGB `video[256,256,3]`；物理缺�
 | 六路 `observation.images.*` | `image[256,256,3]` 或 `video[256,256,3]` | backend 对应的 RGB 图像；物理缺失由 mask 声明 |
 | `observation.state` | `float32[20]` | 双臂 absolute TCP，reshape 为 `[2,10]` |
 | `action` | `float32[20]` | Canonical schema 字段；训练监督不读取它，而是由 state window 重算 |
-| `observation.tactile.values` | `float32[4,3,25,6]` | 触觉值；可由 mask 声明缺失 |
-| `observation.tactile.dt` | `float32[4,3]` | 触觉时间差；可由 mask 声明缺失 |
+| `observation.tactile.values` | source `float32[4,3,25,6]` | 每个30Hz源行打包的触觉值；可由 mask 声明缺失 |
+| `observation.tactile.dt` | source `float32[4,3]` | 每个源触觉相对其30Hz行的时间差；可由 mask 声明缺失 |
 | `timestamp` | `float64[1]` | Episode 内物理时间 |
 | `frame_index` | `int64[1]` | Episode 内帧索引 |
 | `episode_index` | `int64[1]` | Episode 标识 |
@@ -327,7 +327,8 @@ State/Action time slot。
 
 ## 6. 完整输出 ABI
 
-设 `N = len(frame_offsets)`、`K = action_steps_per_rgb_frame`：
+设 `N = len(frame_offsets)`、`K = action_steps_per_rgb_frame`、
+`Q = tactile_steps_per_rgb_frame`：
 
 两种模式共同返回：
 
@@ -359,11 +360,16 @@ Canonical mode 另外返回：
     "action_feature_mask":           bool[128],
     "observation_state_element_mask": bool[20],
     "action_element_mask":           bool[20],
-    "observation.tactile.values":    float32[4, 3, 25, 6],
-    "observation.tactile.dt":        float32[4, 3],
+    "observation.tactile.values":    float32[N, 4, Q, 25, 6],
+    "observation.tactile.dt":        float32[N, 4, Q],
+    "tactile_valid":                 bool[N, 4, Q],
     "tactile_field_mask":            bool[2],
 }
 ```
+
+每个 RGB 槽使用其前一个 RGB 周期内的原始触觉。源行中的三个打包槽先按
+`row timestamp + tactile.dt` 恢复真实时间，再映射到 `Q` 个固定、因果的时间槽；
+不压缩缺失位置。无效槽返回零 `values`、零 `dt` 和 `tactile_valid=False`。
 
 Video-only mode 不返回上面的任何字段，尤其不返回 state/action、Action 时间轴或
 feature/element mask。

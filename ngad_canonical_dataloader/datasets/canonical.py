@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -58,6 +59,10 @@ CANONICAL_IDENTITY_KEYS = (
     "task_index",
 )
 CANONICAL_IMAGE_SIZE = 256
+TACTILE_SENSOR_COUNT = 4
+TACTILE_SOURCE_STEPS_PER_ROW = 3
+TACTILE_HEIGHT = 25
+TACTILE_WIDTH = 6
 DEFAULT_PROMPT = "A video recorded from a robot's point of view executing the following instruction: {task}"
 TABLE_DIRECTORY_PATTERN = re.compile(r"table_(\d{3})")
 
@@ -252,6 +257,7 @@ class NGADCanonicalDataset(Dataset):
         action_steps_per_rgb_frame: int,
         anchor_offset: int,
         frame_ranges: tuple[tuple[int, int], ...],
+        tactile_steps_per_rgb_frame: int = 8,
         max_samples: int | None = None,
         validation_split: float = 0.0,
         validation_seed: int = 3407,
@@ -274,6 +280,11 @@ class NGADCanonicalDataset(Dataset):
             raise ValueError("NGADCanonicalDataset requires a positive RGB rate.")
         if int(anchor_offset) != 0:
             raise ValueError("The canonical timeline anchor_offset must be 0.")
+        if (
+            type(tactile_steps_per_rgb_frame) is not int
+            or tactile_steps_per_rgb_frame <= 0
+        ):
+            raise ValueError("tactile_steps_per_rgb_frame must be a positive integer.")
         timeline_layout = build_timeline_layout(
             frame_ranges,
             action_steps_per_rgb_frame,
@@ -327,8 +338,12 @@ class NGADCanonicalDataset(Dataset):
         self.camera_keys = self.expected_camera_keys
         self.rgb_rate_hz = float(rgb_rate_hz)
         self.action_steps_per_rgb_frame = int(action_steps_per_rgb_frame)
+        self.tactile_steps_per_rgb_frame = tactile_steps_per_rgb_frame
         self.action_rate_hz = (
             self.rgb_rate_hz * self.action_steps_per_rgb_frame
+        )
+        self.tactile_rate_hz = (
+            self.rgb_rate_hz * self.tactile_steps_per_rgb_frame
         )
         self.timeline_layout: TimelineLayout = timeline_layout
         self.resolution = CANONICAL_IMAGE_SIZE
@@ -598,17 +613,22 @@ class NGADCanonicalDataset(Dataset):
         )
         if not torch.any(camera_mask):
             raise ValueError(f"{path} must enable at least one canonical camera.")
+        tactile_mask = torch.tensor(
+            [
+                field_mask[CANONICAL_TACTILE_VALUES_KEY],
+                field_mask[CANONICAL_TACTILE_DT_KEY],
+            ],
+            dtype=torch.bool,
+        )
+        if bool(tactile_mask[0]) != bool(tactile_mask[1]):
+            raise ValueError(
+                f"{path} must enable or disable tactile values and dt together."
+            )
         return {
             "field_mask": field_mask,
             "field_mapping": dict(field_mapping),
             "camera_mask": camera_mask,
-            "tactile_mask": torch.tensor(
-                [
-                    field_mask[CANONICAL_TACTILE_VALUES_KEY],
-                    field_mask[CANONICAL_TACTILE_DT_KEY],
-                ],
-                dtype=torch.bool,
-            ),
+            "tactile_mask": tactile_mask,
             "state_element_mask": element_tensors[CANONICAL_STATE_KEY],
             "action_element_mask": element_tensors[CANONICAL_ACTION_KEY],
             "pixel_mask_path": (path.parent / pixel["path"]).resolve(),
@@ -671,6 +691,138 @@ class NGADCanonicalDataset(Dataset):
         if torch.any(torch.abs(source_time - target_time) > tolerance):
             raise RuntimeError("Nearest-frame sampling exceeded half a source-frame interval.")
         return source
+
+    def _tactile_candidate_source_indices(
+        self,
+        frame_indices: torch.Tensor,
+        source_fps: float,
+        source_length: int,
+    ) -> torch.Tensor:
+        """Return source rows whose packed tactile slots cover each RGB interval."""
+        source_rows_per_rgb = int(round(source_fps / self.rgb_rate_hz))
+        anchor_rows = self._source_indices(
+            frame_indices,
+            source_fps,
+            self.rgb_rate_hz,
+        )
+        offsets = torch.arange(
+            1 - source_rows_per_rgb,
+            1,
+            dtype=torch.long,
+        )
+        return (anchor_rows[:, None] + offsets[None]).clamp(
+            0,
+            int(source_length) - 1,
+        )
+
+    def _align_tactile_to_rgb_frames(
+        self,
+        rows: dict[int, dict[str, Any]],
+        frame_indices: torch.Tensor,
+        candidate_source_indices: torch.Tensor,
+        frame_valid: torch.Tensor,
+        timestamp_start: torch.Tensor,
+        tactile_available: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Map packed source tactile events onto fixed causal RGB-frame slots."""
+        frame_count = int(frame_indices.numel())
+        steps = self.tactile_steps_per_rgb_frame
+        tactile_values = torch.zeros(
+            (
+                frame_count,
+                TACTILE_SENSOR_COUNT,
+                steps,
+                TACTILE_HEIGHT,
+                TACTILE_WIDTH,
+            ),
+            dtype=torch.float32,
+        )
+        tactile_dt = torch.zeros(
+            (frame_count, TACTILE_SENSOR_COUNT, steps),
+            dtype=torch.float32,
+        )
+        tactile_valid = torch.zeros(
+            (frame_count, TACTILE_SENSOR_COUNT, steps),
+            dtype=torch.bool,
+        )
+        if not tactile_available:
+            return tactile_values, tactile_dt, tactile_valid
+
+        interval_seconds = 1.0 / self.rgb_rate_hz
+        slot_seconds = interval_seconds / steps
+        episode_start = float(timestamp_start.item())
+        best_distance = torch.full(
+            (frame_count, TACTILE_SENSOR_COUNT, steps),
+            torch.inf,
+            dtype=torch.float64,
+        )
+        for frame_position, (frame_index, is_valid) in enumerate(
+            zip(frame_indices.tolist(), frame_valid.tolist())
+        ):
+            if not is_valid:
+                continue
+            frame_timestamp = episode_start + int(frame_index) / self.rgb_rate_hz
+            interval_start = frame_timestamp - interval_seconds
+            for source_index in dict.fromkeys(
+                int(index) for index in candidate_source_indices[frame_position].tolist()
+            ):
+                row = rows[source_index]
+                source_values = torch.as_tensor(
+                    row[CANONICAL_TACTILE_VALUES_KEY], dtype=torch.float32
+                )
+                source_dt = torch.as_tensor(
+                    row[CANONICAL_TACTILE_DT_KEY], dtype=torch.float64
+                )
+                expected_values_shape = (
+                    TACTILE_SENSOR_COUNT,
+                    TACTILE_SOURCE_STEPS_PER_ROW,
+                    TACTILE_HEIGHT,
+                    TACTILE_WIDTH,
+                )
+                if tuple(source_values.shape) != expected_values_shape:
+                    raise ValueError(
+                        "Canonical tactile values must have shape "
+                        f"{expected_values_shape}, got {tuple(source_values.shape)}."
+                    )
+                expected_dt_shape = (
+                    TACTILE_SENSOR_COUNT,
+                    TACTILE_SOURCE_STEPS_PER_ROW,
+                )
+                if tuple(source_dt.shape) != expected_dt_shape:
+                    raise ValueError(
+                        "Canonical tactile dt must have shape "
+                        f"{expected_dt_shape}, got {tuple(source_dt.shape)}."
+                    )
+                row_timestamp = float(row["timestamp"])
+                for sensor in range(TACTILE_SENSOR_COUNT):
+                    for source_slot in range(TACTILE_SOURCE_STEPS_PER_ROW):
+                        relative_dt = float(source_dt[sensor, source_slot])
+                        if not math.isfinite(relative_dt):
+                            continue
+                        event_timestamp = row_timestamp + relative_dt
+                        position = (event_timestamp - interval_start) / slot_seconds
+                        tolerance = 1.0e-6
+                        if position <= tolerance or position > steps + tolerance:
+                            continue
+                        target_slot = min(
+                            steps - 1,
+                            max(0, int(math.ceil(position - tolerance)) - 1),
+                        )
+                        slot_center = interval_start + (target_slot + 0.5) * slot_seconds
+                        distance = abs(event_timestamp - slot_center)
+                        if distance >= float(
+                            best_distance[frame_position, sensor, target_slot]
+                        ):
+                            continue
+                        tactile_values[frame_position, sensor, target_slot] = (
+                            source_values[sensor, source_slot]
+                        )
+                        tactile_dt[frame_position, sensor, target_slot] = (
+                            event_timestamp - frame_timestamp
+                        )
+                        tactile_valid[frame_position, sensor, target_slot] = True
+                        best_distance[frame_position, sensor, target_slot] = distance
+        return tactile_values, tactile_dt, tactile_valid
 
     @staticmethod
     def _state_interpolation_indices(
@@ -943,6 +1095,8 @@ class NGADCanonicalDataset(Dataset):
                 "rgb_rate_hz": self.rgb_rate_hz,
                 "action_steps_per_rgb_frame": self.action_steps_per_rgb_frame,
                 "action_rate_hz": self.action_rate_hz,
+                "tactile_steps_per_rgb_frame": self.tactile_steps_per_rgb_frame,
+                "tactile_rate_hz": self.tactile_rate_hz,
                 "anchor_timestamp": anchor_timestamp,
                 "anchor_rgb_index": anchor_rgb_index,
             },
@@ -968,6 +1122,12 @@ class NGADCanonicalDataset(Dataset):
             source_fps,
             self.rgb_rate_hz,
         )
+        tactile_available = bool(torch.all(meta["tactile_mask"]).item())
+        tactile_source_indices = self._tactile_candidate_source_indices(
+            timeline.frame_indices,
+            source_fps,
+            episode["length"],
+        )
         if self.video_only:
             requested = torch.unique(
                 torch.cat([source_frame_indices, anchor_source_index]), sorted=True
@@ -987,7 +1147,19 @@ class NGADCanonicalDataset(Dataset):
                 episode["length"],
             )
             requested = torch.unique(
-                torch.cat([source_frame_indices, state_lower, state_upper]), sorted=True
+                torch.cat(
+                    [
+                        source_frame_indices,
+                        state_lower,
+                        state_upper,
+                        *(
+                            [tactile_source_indices.reshape(-1)]
+                            if tactile_available
+                            else []
+                        ),
+                    ]
+                ),
+                sorted=True,
             )
         # Stored Action is never a physical input. The model-facing Action is
         # reconstructed exclusively from the absolute State interpolation grid.
@@ -1041,15 +1213,13 @@ class NGADCanonicalDataset(Dataset):
             [rows[int(frame)][CANONICAL_STATE_KEY] for frame in state_upper.tolist()],
             dtype=torch.float32,
         ))
-        tactile_values = (
-            torch.as_tensor(current_row[CANONICAL_TACTILE_VALUES_KEY], dtype=torch.float32)
-            if meta["tactile_mask"][0]
-            else torch.zeros((4, 3, 25, 6), dtype=torch.float32)
-        )
-        tactile_dt = (
-            torch.as_tensor(current_row[CANONICAL_TACTILE_DT_KEY], dtype=torch.float32)
-            if meta["tactile_mask"][1]
-            else torch.zeros((4, 3), dtype=torch.float32)
+        tactile_values, tactile_dt, tactile_valid = self._align_tactile_to_rgb_frames(
+            rows,
+            timeline.frame_indices,
+            tactile_source_indices,
+            timeline.frame_valid,
+            torch.as_tensor(rows[0]["timestamp"], dtype=torch.float64).reshape(()),
+            tactile_available,
         )
         absolute_state_grid = interpolate_canonical_tcp(
             lower_state, upper_state, state_fraction
@@ -1104,6 +1274,7 @@ class NGADCanonicalDataset(Dataset):
             "action_element_mask": action_element_mask,
             CANONICAL_TACTILE_VALUES_KEY: tactile_values,
             CANONICAL_TACTILE_DT_KEY: tactile_dt,
+            "tactile_valid": tactile_valid,
             "tactile_field_mask": tactile_mask,
         })
         return sample

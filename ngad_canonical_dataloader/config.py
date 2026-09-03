@@ -19,17 +19,22 @@ class TimelineConfig:
     action_steps_per_rgb_frame: int
     anchor_offset: int
     frame_ranges: tuple[tuple[int, int], ...]
+    tactile_steps_per_rgb_frame: int = 8
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "TimelineConfig":
-        expected = {
+        required = {
             "rgb_rate_hz",
             "action_steps_per_rgb_frame",
             "anchor_offset",
             "frame_ranges",
         }
-        if set(value) != expected:
-            raise ValueError(f"timeline must contain exactly {sorted(expected)}.")
+        allowed = {*required, "tactile_steps_per_rgb_frame"}
+        if not required.issubset(value) or not set(value).issubset(allowed):
+            raise ValueError(
+                f"timeline must contain {sorted(required)}, with optional "
+                "tactile_steps_per_rgb_frame."
+            )
         ranges_value = value["frame_ranges"]
         if not isinstance(ranges_value, list):
             raise TypeError("timeline.frame_ranges must be a list of [start, end] pairs.")
@@ -42,6 +47,9 @@ class TimelineConfig:
             action_steps_per_rgb_frame=int(value["action_steps_per_rgb_frame"]),
             anchor_offset=int(value["anchor_offset"]),
             frame_ranges=frame_ranges,
+            tactile_steps_per_rgb_frame=int(
+                value.get("tactile_steps_per_rgb_frame", 8)
+            ),
         )
 
 
@@ -153,6 +161,7 @@ class DatasetConfig:
             "dataset_dirs": [root.to_dataset_entry() for root in self.dataset_dirs],
             "rgb_rate_hz": self.timeline.rgb_rate_hz,
             "action_steps_per_rgb_frame": self.timeline.action_steps_per_rgb_frame,
+            "tactile_steps_per_rgb_frame": self.timeline.tactile_steps_per_rgb_frame,
             "anchor_offset": self.timeline.anchor_offset,
             "frame_ranges": self.timeline.frame_ranges,
             "max_samples": self.max_samples,

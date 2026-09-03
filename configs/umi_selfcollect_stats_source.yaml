@@ -10,6 +10,7 @@ dataset:
   timeline:
     rgb_rate_hz: 10
     action_steps_per_rgb_frame: 2
+    tactile_steps_per_rgb_frame: 8
     anchor_offset: 0
     frame_ranges:
       - [-232, -225]

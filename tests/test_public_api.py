@@ -543,6 +543,71 @@ def test_canonical_video_preparation_only_normalizes_fixed_uint8_frames() -> Non
         dataset._prepare_video(torch.zeros((2, 3, 224, 224), dtype=torch.uint8))
 
 
+def test_tactile_events_align_to_fixed_rgb_slots_without_compaction() -> None:
+    dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
+    dataset.rgb_rate_hz = 10.0
+    dataset.tactile_steps_per_rgb_frame = 8
+    dataset.tactile_rate_hz = 80.0
+
+    candidate_rows = dataset._tactile_candidate_source_indices(
+        torch.tensor([0, 1, 2]),
+        source_fps=30.0,
+        source_length=20,
+    )
+    assert candidate_rows.tolist() == [[0, 0, 0], [1, 2, 3], [4, 5, 6]]
+
+    event_times = [0.00625 + 0.0125 * index for index in range(8)]
+    packed_events = {
+        1: event_times[:3],
+        2: [event_times[2], event_times[3], event_times[4]],
+        3: event_times[5:],
+    }
+    rows = {}
+    for row_index, events in packed_events.items():
+        row_timestamp = row_index / 30.0
+        values = torch.stack(
+            [
+                torch.stack(
+                    [torch.full((25, 6), event_times.index(event) + 1.0) for event in events]
+                )
+                for _ in range(4)
+            ]
+        )
+        dt = torch.tensor(
+            [[event - row_timestamp for event in events] for _ in range(4)],
+            dtype=torch.float64,
+        )
+        rows[row_index] = {
+            "timestamp": row_timestamp,
+            CANONICAL_TACTILE_VALUES_KEY: values,
+            CANONICAL_TACTILE_DT_KEY: dt,
+        }
+    rows[2][CANONICAL_TACTILE_DT_KEY][1, 1] = torch.nan
+    rows[2][CANONICAL_TACTILE_VALUES_KEY][1, 1] = 0
+
+    values, dt, valid = dataset._align_tactile_to_rgb_frames(
+        rows,
+        frame_indices=torch.tensor([1]),
+        candidate_source_indices=torch.tensor([[1, 2, 3]]),
+        frame_valid=torch.tensor([True]),
+        timestamp_start=torch.tensor(0.0, dtype=torch.float64),
+        tactile_available=True,
+    )
+
+    assert values.shape == (1, 4, 8, 25, 6)
+    assert dt.shape == (1, 4, 8)
+    assert valid.shape == (1, 4, 8)
+    assert valid[0, 0].all()
+    torch.testing.assert_close(
+        dt[0, 0],
+        torch.tensor([event - 0.1 for event in event_times], dtype=torch.float32),
+    )
+    assert not valid[0, 1, 3]
+    assert torch.count_nonzero(values[0, 1, 3]) == 0
+    assert dt[0, 1, 3] == 0
+    assert valid[0, 1].sum() == 7
+
+
 def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> None:
     root = tmp_path / "canonical"
     table_root = root / "table_000"

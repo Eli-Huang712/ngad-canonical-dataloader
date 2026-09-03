@@ -217,8 +217,8 @@ fragment、shard、`.work` 或 `.publishing` 等旧拓扑。
 | 六路 `observation.images.*` | `image[256,256,3]` 或 `video[256,256,3]` | Lance inline JPEG 使用 `image`，Parquet/H.264 使用 `video`；缺失视角由 mask 声明 |
 | `observation.state` | `float32[20]` | 双臂 absolute TCP，reshape 为 `[2,10]` |
 | `action` | `float32[20]` | 落盘字段；不作为训练监督，Action 由 state window 重算 |
-| `observation.tactile.values` | `float32[4,3,25,6]` | 可选触觉值 |
-| `observation.tactile.dt` | `float32[4,3]` | 可选触觉时间差 |
+| `observation.tactile.values` | source `float32[4,3,25,6]` | 每个30Hz源行打包的可选触觉值 |
+| `observation.tactile.dt` | source `float32[4,3]` | 每个源触觉相对其30Hz行的时间差 |
 | identity fields | scalar | `timestamp/frame_index/episode_index/index/task_index` |
 
 每臂 TCP10 为 XYZ `[3]`、row-major Rot6D `[6]`、absolute gripper openness `[1]`。

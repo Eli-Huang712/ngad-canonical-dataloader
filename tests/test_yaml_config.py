@@ -15,6 +15,7 @@ def test_example_yaml_matches_the_strict_config_contract() -> None:
     config = load_dataset_config(path)
     assert config.timeline.rgb_rate_hz == 10
     assert config.timeline.action_steps_per_rgb_frame == 2
+    assert config.timeline.tactile_steps_per_rgb_frame == 8
     assert config.timeline.anchor_offset == 0
     assert config.timeline.frame_ranges[-1] == (-32, 16)
     assert (
