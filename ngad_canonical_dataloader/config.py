@@ -52,28 +52,45 @@ class DatasetRootConfig:
     name: str
     path: str
     mask_and_mapping_path: str
+    parquet_row_addressing: str = "global_contiguous"
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "DatasetRootConfig":
-        expected = {
+        required = {
             "name",
             "path",
             "mask_and_mapping_path",
         }
-        if set(value) != expected:
-            raise ValueError(f"Each dataset root must contain exactly {sorted(expected)}.")
+        allowed = {*required, "parquet_row_addressing"}
+        if not required.issubset(value) or not set(value).issubset(allowed):
+            raise ValueError(
+                "Each dataset root must contain exactly name, path, and "
+                "mask_and_mapping_path, plus optional parquet_row_addressing."
+            )
+        parquet_row_addressing = str(
+            value.get("parquet_row_addressing", "global_contiguous")
+        )
+        if parquet_row_addressing not in {"global_contiguous", "episode_indexed"}:
+            raise ValueError(
+                "parquet_row_addressing must be 'global_contiguous' or "
+                "'episode_indexed'."
+            )
         return cls(
             name=str(value["name"]),
             path=str(value["path"]),
             mask_and_mapping_path=str(value["mask_and_mapping_path"]),
+            parquet_row_addressing=parquet_row_addressing,
         )
 
     def to_dataset_entry(self) -> dict[str, str]:
-        return {
+        entry = {
             "name": self.name,
             "path": self.path,
             "mask_and_mapping_path": self.mask_and_mapping_path,
         }
+        if self.parquet_row_addressing != "global_contiguous":
+            entry["parquet_row_addressing"] = self.parquet_row_addressing
+        return entry
 
 
 @dataclass(frozen=True)

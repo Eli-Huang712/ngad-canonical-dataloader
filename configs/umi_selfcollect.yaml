@@ -1,0 +1,21 @@
+dataset:
+  normalization_stats_path: /gpfs/jiuquyun/datasets/PRETRAIN_DATA/UMI-Collectsite-KS3-canonical-v3/dataset_configs_v2/normalization/table_000.json
+  dataset_dirs:
+    - name: umi_table_000
+      path: /gpfs/jiuquyun/datasets/PRETRAIN_DATA/UMI-Collectsite-KS3-canonical-v3/table_000
+      mask_and_mapping_path: /gpfs/jiuquyun/datasets/PRETRAIN_DATA/UMI-Collectsite-KS3-canonical-v3/dataset_configs_v2/masks/mask_and_mapping_umi_table_000.json
+      parquet_row_addressing: episode_indexed
+  timeline:
+    rgb_rate_hz: 10
+    action_steps_per_rgb_frame: 2
+    anchor_offset: 0
+    frame_ranges:
+      - [-232, -225]
+      - [-182, -175]
+      - [-132, -125]
+      - [-82, -75]
+      - [-32, 16]
+  split: train
+  validation_split: 0.0
+  validation_seed: 3407
+  max_samples: null

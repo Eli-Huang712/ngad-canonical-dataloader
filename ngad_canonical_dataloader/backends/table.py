@@ -156,12 +156,26 @@ class LanceTableBackend:
 class ParquetTableBackend:
     """Read canonical metadata and rows from one LeRobot v3 Parquet root."""
 
-    def __init__(self, root: Path, info: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        root: Path,
+        info: dict[str, Any],
+        row_addressing: str = "global_contiguous",
+    ) -> None:
+        if row_addressing not in {"global_contiguous", "episode_indexed"}:
+            raise ValueError(
+                "Parquet row_addressing must be 'global_contiguous' or "
+                "'episode_indexed'."
+            )
         self.root = root
         self.info = info
+        self.row_addressing = row_addressing
         self._data_file_starts: dict[tuple[int, int], int] = {}
         self._handles: dict[tuple[int, int], Any] = {}
         self._row_group_ends: dict[tuple[int, int], list[int]] = {}
+        self._episode_row_ranges: dict[
+            tuple[int, int], dict[int, tuple[int, int]]
+        ] = {}
         self._pid = os.getpid()
 
     def read_catalog(
@@ -254,6 +268,32 @@ class ParquetTableBackend:
                 episode["dataset_from_index"],
             )
             episodes.append(episode)
+        if self.row_addressing == "episode_indexed":
+            episodes_by_file: dict[tuple[int, int], list[dict[str, Any]]] = {}
+            for episode in episodes:
+                file_key = (
+                    episode["data_chunk_index"],
+                    episode["data_file_index"],
+                )
+                episodes_by_file.setdefault(file_key, []).append(episode)
+            self._episode_row_ranges = {}
+            for file_key, file_episodes in episodes_by_file.items():
+                local_start = 0
+                ranges: dict[int, tuple[int, int]] = {}
+                for episode in sorted(
+                    file_episodes,
+                    key=lambda record: record["dataset_from_index"],
+                ):
+                    episode_index = episode["episode_index"]
+                    if episode_index in ranges:
+                        raise ValueError(
+                            f"Duplicate episode {episode_index} in Parquet shard "
+                            f"{file_key}."
+                        )
+                    local_end = local_start + episode["length"]
+                    ranges[episode_index] = (local_start, local_end)
+                    local_start = local_end
+                self._episode_row_ranges[file_key] = ranges
         return tasks, sorted(episodes, key=lambda record: record["dataset_from_index"])
 
     def _data_file(self, episode: dict[str, Any]):
@@ -285,6 +325,55 @@ class ParquetTableBackend:
         self._row_group_ends[cache_key] = row_group_ends
         return parquet_file, row_group_ends
 
+    def _episode_rows(
+        self,
+        file_key: tuple[int, int],
+        parquet_file: Any,
+        field_mapping: dict[str, str],
+    ) -> dict[int, tuple[int, int]]:
+        """Index physical episode blocks in one non-contiguous Parquet shard."""
+        if file_key in self._episode_row_ranges:
+            return self._episode_row_ranges[file_key]
+        episode_column = _physical_key("episode_index", field_mapping)
+        frame_column = _physical_key("frame_index", field_mapping)
+        identity = parquet_file.read(columns=[episode_column, frame_column]).to_pydict()
+        episode_values = identity[episode_column]
+        frame_values = identity[frame_column]
+        if not episode_values:
+            raise ValueError(f"Canonical Parquet shard {file_key} contains no rows.")
+
+        ranges: dict[int, tuple[int, int]] = {}
+        block_start = 0
+        current_episode = int(episode_values[0])
+        for local_row, (episode_value, frame_value) in enumerate(
+            zip(episode_values, frame_values)
+        ):
+            episode_index = int(episode_value)
+            frame_index = int(frame_value)
+            if episode_index != current_episode:
+                if current_episode in ranges:
+                    raise ValueError(
+                        f"Episode {current_episode} is not contiguous in Parquet shard "
+                        f"{file_key}."
+                    )
+                ranges[current_episode] = (block_start, local_row)
+                block_start = local_row
+                current_episode = episode_index
+            expected_frame = local_row - block_start
+            if frame_index != expected_frame:
+                raise ValueError(
+                    f"Episode {episode_index} has frame_index {frame_index} at local "
+                    f"row {local_row}, expected {expected_frame}, in Parquet shard "
+                    f"{file_key}."
+                )
+        if current_episode in ranges:
+            raise ValueError(
+                f"Episode {current_episode} is not contiguous in Parquet shard {file_key}."
+            )
+        ranges[current_episode] = (block_start, len(episode_values))
+        self._episode_row_ranges[file_key] = ranges
+        return ranges
+
     def read_rows(
         self,
         episode: dict[str, Any],
@@ -304,12 +393,29 @@ class ParquetTableBackend:
         requested = {0}
         requested.update(int(index) for index in relative_indices.tolist())
         file_key = (episode["data_chunk_index"], episode["data_file_index"])
-        file_start = self._data_file_starts[file_key]
+        parquet_file, row_group_ends = self._data_file(episode)
+        if self.row_addressing == "episode_indexed":
+            episode_rows = self._episode_rows(file_key, parquet_file, field_mapping)
+            try:
+                episode_start, episode_end = episode_rows[episode["episode_index"]]
+            except KeyError as error:
+                raise IndexError(
+                    f"Episode {episode['episode_index']} is absent from Parquet shard "
+                    f"{file_key}."
+                ) from error
+            if episode_end - episode_start != episode["length"]:
+                raise ValueError(
+                    f"Episode {episode['episode_index']} metadata length "
+                    f"{episode['length']} does not match its {episode_end - episode_start} "
+                    f"physical rows in Parquet shard {file_key}."
+                )
+        else:
+            file_start = self._data_file_starts[file_key]
+            episode_start = episode["dataset_from_index"] - file_start
         local_rows = {
-            episode["dataset_from_index"] + relative_index - file_start: relative_index
+            episode_start + relative_index: relative_index
             for relative_index in requested
         }
-        parquet_file, row_group_ends = self._data_file(episode)
         if not local_rows or min(local_rows) < 0 or max(local_rows) >= row_group_ends[-1]:
             raise IndexError(f"LeRobot v3 episode offsets exceed their data shard: {episode}.")
 

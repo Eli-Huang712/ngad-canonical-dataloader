@@ -43,7 +43,7 @@ DEFAULT_HY_CONFIG_ROOT = Path(
 )
 DEFAULT_UMI_CONFIG_PATH = Path(
     "/gpfs/jiuquyun/datasets/PRETRAIN_DATA/UMI-Collectsite-KS3-canonical-v3/"
-    "dataset_configs/configs/umi_table_000.yaml"
+    "dataset_configs_v2/configs/umi_table_000.yaml"
 )
 
 

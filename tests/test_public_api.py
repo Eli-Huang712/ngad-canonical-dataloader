@@ -125,6 +125,14 @@ def test_storage_backend_factory_selects_only_supported_physical_pairs(tmp_path)
         create_storage_backends(tmp_path / "unknown", "table_002", {})
 
 
+def test_h264_backend_splits_sparse_timeline_decode_groups() -> None:
+    requested = [132, 0, 3, 6, 129, 132, 261, 264]
+
+    groups = H264ImageBackend._decode_groups(requested)
+
+    assert groups == ((0, 3, 6), (129, 132), (261, 264))
+
+
 def test_lance_backend_accepts_sparse_source_indices_after_row_filtering(
     tmp_path,
     monkeypatch,
@@ -169,6 +177,58 @@ def test_lance_backend_accepts_sparse_source_indices_after_row_filtering(
     assert rows[2]["index"] == 104
     assert rows[2]["episode_index"] == 7
     assert rows[2]["frame_index"] == 2
+
+
+def test_parquet_backend_can_address_non_contiguous_global_episode_blocks(
+    tmp_path,
+) -> None:
+    """UMI shards are physically dense even when their global indices have gaps."""
+    data_path = tmp_path / "data" / "chunk-000" / "file-000.parquet"
+    data_path.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "index": [0, 1, 4, 5],
+                "episode_index": [0, 0, 2, 2],
+                "frame_index": [0, 1, 0, 1],
+                "task_index": [0, 0, 0, 0],
+                "timestamp": [0.0, 1.0, 0.0, 1.0],
+            }
+        ),
+        data_path,
+    )
+    backend = ParquetTableBackend(
+        tmp_path,
+        {"data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"},
+        row_addressing="episode_indexed",
+    )
+    backend._data_file_starts[(0, 0)] = 0
+
+    rows = backend.read_rows(
+        episode={
+            "episode_index": 2,
+            "length": 2,
+            "dataset_from_index": 4,
+            "dataset_to_index": 6,
+            "data_chunk_index": 0,
+            "data_file_index": 0,
+        },
+        relative_indices=torch.tensor([0, 1]),
+        field_mask={
+            "observation.state": False,
+            CANONICAL_TACTILE_VALUES_KEY: False,
+            CANONICAL_TACTILE_DT_KEY: False,
+        },
+        field_mapping={},
+        camera_keys=(),
+        camera_mask=torch.tensor([], dtype=torch.bool),
+    )
+
+    assert sorted(rows) == [0, 1]
+    assert rows[0]["index"] == 4
+    assert rows[0]["episode_index"] == 2
+    assert rows[1]["index"] == 5
+    assert rows[1]["frame_index"] == 1
 
 
 def test_dataset_root_discovers_direct_tables_in_numeric_order(tmp_path) -> None:

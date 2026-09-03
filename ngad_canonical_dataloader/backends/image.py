@@ -52,6 +52,23 @@ class H264ImageBackend:
         """Use the nominal fixed rate instead of duration-skewed MP4 average rate."""
         return float(stream.base_rate or stream.average_rate or fallback)
 
+    @staticmethod
+    def _decode_groups(requested: list[int]) -> tuple[tuple[int, ...], ...]:
+        """Separate sparse timeline ranges while retaining their sampling stride."""
+        unique = sorted(set(requested))
+        if len(unique) <= 1:
+            return (tuple(unique),)
+        sampling_stride = min(
+            current - previous
+            for previous, current in zip(unique, unique[1:])
+        )
+        groups: list[list[int]] = [[unique[0]]]
+        for previous, current in zip(unique, unique[1:]):
+            if current - previous > sampling_stride:
+                groups.append([])
+            groups[-1].append(current)
+        return tuple(tuple(group) for group in groups)
+
     def read_camera(
         self,
         rows: dict[int, dict[str, Any]],
@@ -97,26 +114,33 @@ class H264ImageBackend:
                     f"Requested frame exceeds the episode video range for {camera} in "
                     f"episode {episode['episode_index']}."
                 )
-            unique = set(requested)
-            first, last = min(unique), max(unique)
-            container.seek(
-                start_pts + int((first / frame_rate) / time_base),
-                stream=stream,
-                backward=True,
-                any_frame=False,
-            )
-            for frame in container.decode(stream):
-                if frame.pts is None:
-                    continue
-                frame_index = int(round((int(frame.pts) - start_pts) * time_base * frame_rate))
-                if frame_index < first:
-                    continue
-                if frame_index > last:
-                    break
-                if frame_index in unique and frame_index not in decoded:
-                    decoded[frame_index] = torch.from_numpy(frame.to_ndarray(format="rgb24"))
-                    if len(decoded) == len(unique):
+            groups = self._decode_groups(requested)
+            unique = set().union(*map(set, groups))
+            for group in groups:
+                group_set = set(group)
+                first, last = group[0], group[-1]
+                container.seek(
+                    start_pts + int((first / frame_rate) / time_base),
+                    stream=stream,
+                    backward=True,
+                    any_frame=False,
+                )
+                for frame in container.decode(stream):
+                    if frame.pts is None:
+                        continue
+                    frame_index = int(
+                        round((int(frame.pts) - start_pts) * time_base * frame_rate)
+                    )
+                    if frame_index < first:
+                        continue
+                    if frame_index > last:
                         break
+                    if frame_index in group_set and frame_index not in decoded:
+                        decoded[frame_index] = torch.from_numpy(
+                            frame.to_ndarray(format="rgb24")
+                        )
+                        if all(index in decoded for index in group):
+                            break
         missing = sorted(unique.difference(decoded))
         if missing:
             raise RuntimeError(f"Failed to decode canonical frames {missing} from {video_path}.")

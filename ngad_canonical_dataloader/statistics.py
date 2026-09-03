@@ -110,6 +110,8 @@ def compute_zscore_statistics(
     *,
     std_floor: float = 1.0e-5,
     anchor_batch_size: int = 2048,
+    episode_start: int = 0,
+    episode_stop: int | None = None,
     max_episodes: int | None = None,
     max_anchors: int | None = None,
     progress_every: int = 100,
@@ -117,6 +119,16 @@ def compute_zscore_statistics(
     """Compute exact sample-distribution moments from absolute state only."""
     if std_floor <= 0 or anchor_batch_size <= 0:
         raise ValueError("std_floor and anchor_batch_size must be positive.")
+    if episode_start < 0:
+        raise ValueError("episode_start must be non-negative.")
+    resolved_stop = len(dataset._episodes) if episode_stop is None else episode_stop
+    if resolved_stop <= episode_start or resolved_stop > len(dataset._episodes):
+        raise ValueError(
+            "episode_stop must be greater than episode_start and no larger than "
+            "the number of Dataset episodes."
+        )
+    if max_episodes is not None:
+        resolved_stop = min(resolved_stop, episode_start + max_episodes)
     state_moments = RunningMoments((2, 9))
     action_moments = RunningMoments((2, 9))
     action_offsets = dataset.timeline_layout.action_step_offsets.reshape(-1)
@@ -124,9 +136,10 @@ def compute_zscore_statistics(
     total_valid_targets = 0
     processed_episodes = 0
 
-    for episode_number, episode in enumerate(dataset._episodes):
-        if max_episodes is not None and processed_episodes >= max_episodes:
-            break
+    for episode_number, episode in enumerate(
+        dataset._episodes[episode_start:resolved_stop],
+        start=episode_start,
+    ):
         if max_anchors is not None and total_anchors >= max_anchors:
             break
         meta = dataset._root_meta[episode["root_index"]]
@@ -216,6 +229,8 @@ def compute_zscore_statistics(
             "method": "population_zscore_parallel_welford",
             "scope": "all valid canonical timeline state/action targets",
             "std_floor": float(std_floor),
+            "episode_start": int(episode_start),
+            "episode_stop": int(episode_start + processed_episodes),
             "episodes": processed_episodes,
             "anchors": total_anchors,
             "valid_targets": total_valid_targets,
@@ -237,6 +252,8 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--std-floor", type=float, default=1.0e-5)
     parser.add_argument("--anchor-batch-size", type=int, default=2048)
+    parser.add_argument("--episode-start", type=int, default=0)
+    parser.add_argument("--episode-stop", type=int)
     parser.add_argument("--max-episodes", type=int)
     parser.add_argument("--max-anchors", type=int)
     parser.add_argument("--progress-every", type=int, default=100)
@@ -248,6 +265,8 @@ def main() -> None:
         dataset,
         std_floor=args.std_floor,
         anchor_batch_size=args.anchor_batch_size,
+        episode_start=args.episode_start,
+        episode_stop=args.episode_stop,
         max_episodes=args.max_episodes,
         max_anchors=args.max_anchors,
         progress_every=args.progress_every,

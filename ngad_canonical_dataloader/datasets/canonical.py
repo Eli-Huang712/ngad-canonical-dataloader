@@ -284,14 +284,20 @@ class NGADCanonicalDataset(Dataset):
         configured_roots: list[dict[str, Any]] = []
         dataset_names: set[str] = set()
         for entry in dataset_dirs:
-            if not isinstance(entry, dict) or set(entry) != {
+            required_entry_fields = {
                 "name",
                 "path",
                 "mask_and_mapping_path",
-            }:
+            }
+            allowed_entry_fields = {*required_entry_fields, "parquet_row_addressing"}
+            if (
+                not isinstance(entry, dict)
+                or not required_entry_fields.issubset(entry)
+                or not set(entry).issubset(allowed_entry_fields)
+            ):
                 raise TypeError(
-                    "Each dataset_dirs entry must contain exactly name, path, "
-                    "and mask_and_mapping_path."
+                    "Each dataset_dirs entry must contain name, path, and "
+                    "mask_and_mapping_path, with optional parquet_row_addressing."
                 )
             name = str(entry["name"]).strip()
             if not name or name in dataset_names:
@@ -304,6 +310,9 @@ class NGADCanonicalDataset(Dataset):
                     "mask_and_mapping_path": Path(
                         os.path.expanduser(str(entry["mask_and_mapping_path"]))
                     ).resolve(),
+                    "parquet_row_addressing": str(
+                        entry.get("parquet_row_addressing", "global_contiguous")
+                    ),
                 }
             )
 
@@ -350,10 +359,16 @@ class NGADCanonicalDataset(Dataset):
         for root_index, (table_record, configured) in enumerate(physical_tables):
             root = table_record["table_root"]
             info = _read_json_object(root / "meta" / "info.json")
+            backend_options: dict[str, Any] = {}
+            if configured["parquet_row_addressing"] != "global_contiguous":
+                backend_options["parquet_row_addressing"] = configured[
+                    "parquet_row_addressing"
+                ]
             table_backend, image_backend = create_storage_backends(
                 root,
                 table_record["table_name"],
                 info,
+                **backend_options,
             )
             mask_contract = mask_contracts[configured["name"]]
             self._validate_features(

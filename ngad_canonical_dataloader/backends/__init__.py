@@ -14,6 +14,7 @@ def create_storage_backends(
     table_root: Path,
     table_name: str,
     info: dict[str, Any],
+    parquet_row_addressing: str = "global_contiguous",
 ) -> tuple[LanceTableBackend | ParquetTableBackend, JpegImageBackend | H264ImageBackend]:
     """Build the one backend pair physically published by a canonical table."""
     lance_root = table_root / f"{table_name}.lance"
@@ -26,6 +27,10 @@ def create_storage_backends(
             f"{table_root} must contain exactly one Lance/JPEG or Parquet/H.264 payload."
         )
     if has_lance:
+        if parquet_row_addressing != "global_contiguous":
+            raise ValueError(
+                "parquet_row_addressing is only valid for Parquet/H.264 tables."
+            )
         if info.get("canonical_schema") != HY_CANONICAL_SCHEMA:
             raise ValueError(
                 f"{table_root} Lance table must declare "
@@ -77,7 +82,11 @@ def create_storage_backends(
                 f"{table_root} parquet_h264 table must contain data/ and videos/."
             )
         return (
-            ParquetTableBackend(table_root, info),
+            ParquetTableBackend(
+                table_root,
+                info,
+                row_addressing=parquet_row_addressing,
+            ),
             H264ImageBackend(table_root, info),
         )
     raise AssertionError("Unreachable canonical storage backend state.")
