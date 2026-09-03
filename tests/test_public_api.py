@@ -111,6 +111,52 @@ def test_storage_backend_factory_selects_only_supported_physical_pairs(tmp_path)
         create_storage_backends(tmp_path / "unknown", "table_002", {})
 
 
+def test_lance_backend_accepts_sparse_source_indices_after_row_filtering(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Compacted episode offsets, not retained source indices, address Lance rows."""
+
+    class FakeLanceDataset:
+        def take(self, offsets, columns):
+            requested = offsets.to_pylist()
+            assert requested == [100, 102]
+            values = {
+                "index": [offset + 2 for offset in requested],
+                "episode_index": [7 for _ in requested],
+                "frame_index": [offset - 100 for offset in requested],
+                "task_index": [3 for _ in requested],
+                "timestamp": [(offset - 100) / 30 for offset in requested],
+            }
+            return pa.table({column: values[column] for column in columns})
+
+    backend = LanceTableBackend(tmp_path, tmp_path / "table_000.lance")
+    monkeypatch.setattr(backend, "_dataset", lambda: FakeLanceDataset())
+    rows = backend.read_rows(
+        episode={
+            "episode_index": 7,
+            "length": 3,
+            "dataset_from_index": 100,
+            "dataset_to_index": 103,
+        },
+        relative_indices=torch.tensor([0, 2]),
+        field_mask={
+            "observation.state": False,
+            CANONICAL_TACTILE_VALUES_KEY: False,
+            CANONICAL_TACTILE_DT_KEY: False,
+        },
+        field_mapping={},
+        camera_keys=(),
+        camera_mask=torch.tensor([], dtype=torch.bool),
+    )
+
+    assert sorted(rows) == [0, 2]
+    assert rows[0]["index"] == 102
+    assert rows[2]["index"] == 104
+    assert rows[2]["episode_index"] == 7
+    assert rows[2]["frame_index"] == 2
+
+
 def test_dataset_root_discovers_direct_tables_in_numeric_order(tmp_path) -> None:
     table_root = tmp_path / "table_000"
     (table_root / "meta").mkdir(parents=True)

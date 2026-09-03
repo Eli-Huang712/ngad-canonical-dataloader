@@ -138,13 +138,17 @@ class LanceTableBackend:
                 key: physical_row[_lance_column(_physical_key(key, field_mapping))]
                 for key in canonical_keys
             }
+            # Episode metadata describes the compacted physical Lance layout. HY
+            # conversion may trim invalid boundary rows while retaining the
+            # pre-filter global ``index`` as source provenance, so that stored
+            # value can be sparse and must not be used as a physical row address.
             if (
-                int(canonical_row["index"])
-                != episode["dataset_from_index"] + relative_index
-                or int(canonical_row["episode_index"]) != episode["episode_index"]
+                int(canonical_row["episode_index"]) != episode["episode_index"]
                 or int(canonical_row["frame_index"]) != relative_index
             ):
-                raise RuntimeError(f"Canonical Lance row identity mismatch at offset {offset}.")
+                raise RuntimeError(
+                    f"Canonical Lance episode/frame identity mismatch at offset {offset}."
+                )
             by_relative_index[relative_index] = canonical_row
         return by_relative_index
 
