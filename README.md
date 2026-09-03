@@ -5,8 +5,8 @@
 metadata；提供 global normalization 时额外输出 absolute State TCP128 与 anchor-relative
 Action TCP128。
 
-本仓库只负责 `Dataset.__init__()` 与 `Dataset.__getitem__()`。PyTorch `DataLoader`、
-GPU transfer、Tokenizer、VAE、flow construction 和模型不在本仓库范围内。完整架构和边界见
+本仓库负责 canonical Dataset 和轻量 PyTorch `DataLoader` 构造。GPU transfer、Tokenizer、
+VAE、flow construction 和模型不在本仓库范围内。完整架构和边界见
 [Input Pipeline Architecture](docs/architecture.md)，详细字段和数值变换见
 [Canonical Data Contract](docs/data-contract.md)。
 
@@ -68,7 +68,49 @@ dataset = build_dataset_from_yaml("configs/canonical.yaml")
 sample = dataset[0]
 ```
 
-### 3. 读取指定 offset
+### 3. 直接构造训练 DataLoader
+
+```python
+from ngad_canonical_dataloader import build_dataloader
+
+loader = build_dataloader(
+    dataset_names=[
+        "hy_table_000",
+        "hy_table_001",
+        "hy_table_002",
+    ],
+    batch_size=4,
+    num_workers=8,
+    shuffle=True,
+)
+
+for batch in loader:
+    video = batch["video"]
+    state = batch["state"]
+    action = batch["action"]
+```
+
+全部 HY 可以直接选择聚合名称：
+
+```python
+loader = build_dataloader(
+    dataset_names="hy_all",
+    batch_size=4,
+    num_workers=16,
+    shuffle=True,
+)
+```
+
+`dataset_names` 接受一个名字或名字列表：19 个正式 `hy_table_NNN`、`hy_all` 和预留的
+`umi_selfcollect`。下游不传文件路径；名字到正式 Dataset YAML 的映射由部署注册表绑定。
+默认绑定 H100 的共享 `PRETRAIN_DATA` 路径，整体迁移时可通过 `NGAD_HY_CONFIG_ROOT` 和
+`NGAD_UMI_CONFIG_PATH` 环境变量覆盖一次，无需修改模型调用。
+
+每张 HY table 仍先使用自己的 normalization 构造 Dataset，再由 `ConcatDataset` 组合。
+`batch_size`、`num_workers` 和 `shuffle` 始终在训练调用处显式配置；`num_workers>0`
+时固定使用已验证的 `spawn + persistent_workers + prefetch_factor=2`。
+
+### 4. 读取指定 offset
 
 offset 是相对当前 anchor 的语义时间坐标，不是 tensor position。例如 10 Hz 下，offset
 `-1` 表示 anchor 之前 `0.1s`：
