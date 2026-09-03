@@ -33,7 +33,12 @@ HY_TABLE_DATASET_NAMES = (
     "hy_table_020",
     "hy_table_021",
 )
-SUPPORTED_DATASET_NAMES = (*HY_TABLE_DATASET_NAMES, "hy_all", "umi_selfcollect")
+SUPPORTED_DATASET_NAMES = (
+    *HY_TABLE_DATASET_NAMES,
+    "hy_all",
+    "umi_selfcollect",
+    "libero",
+)
 
 # Training code selects only stable dataset names. Deployment owns these roots;
 # environment overrides relocate a complete config set without changing model code.
@@ -45,6 +50,10 @@ DEFAULT_UMI_CONFIG_PATH = Path(
     "/gpfs/jiuquyun/datasets/PRETRAIN_DATA/UMI-Collectsite-KS3-canonical-v3/"
     "dataset_configs_v2/configs/umi_table_000.yaml"
 )
+DEFAULT_LIBERO_CONFIG_PATH = Path(
+    "/gpfs/jiuquyun/datasets/PRETRAIN_DATA/LIBERO/"
+    "dataset_configs/configs/libero.yaml"
+)
 
 
 def registered_dataset_config_paths() -> dict[str, Path]:
@@ -55,8 +64,12 @@ def registered_dataset_config_paths() -> dict[str, Path]:
     umi_path = Path(
         os.environ.get("NGAD_UMI_CONFIG_PATH", str(DEFAULT_UMI_CONFIG_PATH))
     ).expanduser().resolve()
+    libero_path = Path(
+        os.environ.get("NGAD_LIBERO_CONFIG_PATH", str(DEFAULT_LIBERO_CONFIG_PATH))
+    ).expanduser().resolve()
     registry = {name: hy_root / f"{name}.yaml" for name in HY_TABLE_DATASET_NAMES}
     registry["umi_selfcollect"] = umi_path
+    registry["libero"] = libero_path
     return registry
 
 

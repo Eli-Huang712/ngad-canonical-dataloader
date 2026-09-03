@@ -40,14 +40,18 @@ def test_registered_names_resolve_without_call_site_paths(tmp_path, monkeypatch)
         (hy_root / f"{name}.yaml").touch()
     umi_path = tmp_path / "umi.yaml"
     umi_path.touch()
+    libero_path = tmp_path / "libero.yaml"
+    libero_path.touch()
     monkeypatch.setenv("NGAD_HY_CONFIG_ROOT", str(hy_root))
     monkeypatch.setenv("NGAD_UMI_CONFIG_PATH", str(umi_path))
+    monkeypatch.setenv("NGAD_LIBERO_CONFIG_PATH", str(libero_path))
 
     assert resolve_registered_config_paths("hy_table_000") == (
         (hy_root / "hy_table_000.yaml").resolve(),
     )
     assert len(resolve_registered_config_paths("hy_all")) == 19
     assert resolve_registered_config_paths("umi_selfcollect") == (umi_path.resolve(),)
+    assert resolve_registered_config_paths("libero") == (libero_path.resolve(),)
 
 
 def test_build_dataloader_exposes_batch_workers_and_shuffle(tmp_path, monkeypatch) -> None:
