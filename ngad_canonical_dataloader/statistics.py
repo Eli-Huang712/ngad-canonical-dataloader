@@ -56,20 +56,38 @@ class RunningMoments:
         )
         self.count = total
 
-    def result(self, std_floor: float) -> dict[str, torch.Tensor]:
-        if torch.any(self.count <= 0):
-            raise RuntimeError(f"No observations for some TCP features: {self.count.tolist()}.")
+    def result(
+        self,
+        std_floor: float,
+        required_mask: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        required = (
+            torch.ones_like(self.count, dtype=torch.bool)
+            if required_mask is None
+            else torch.as_tensor(required_mask, dtype=torch.bool)
+        )
+        if required.shape != self.count.shape:
+            raise ValueError(
+                f"required_mask must have shape {tuple(self.count.shape)}, "
+                f"got {tuple(required.shape)}."
+            )
+        if torch.any(required & (self.count <= 0)):
+            raise RuntimeError(
+                f"No observations for required TCP features: {self.count.tolist()}."
+            )
         variance = self.m2 / self.count
-        raw_std = variance.clamp_min(0.0).sqrt()
+        raw_std = torch.where(
+            required, variance.clamp_min(0.0).sqrt(), torch.zeros_like(variance)
+        )
         safe_std = torch.where(
-            raw_std < float(std_floor), torch.ones_like(raw_std), raw_std
+            required & (raw_std >= float(std_floor)), raw_std, torch.ones_like(raw_std)
         )
         return {
             "count": self.count,
-            "mean": self.mean,
+            "mean": torch.where(required, self.mean, torch.zeros_like(self.mean)),
             "raw_std": raw_std,
             "std": safe_std,
-            "std_floor_applied": raw_std < float(std_floor),
+            "std_floor_applied": required & (raw_std < float(std_floor)),
         }
 
 
@@ -135,6 +153,7 @@ def compute_zscore_statistics(
     total_anchors = 0
     total_valid_targets = 0
     processed_episodes = 0
+    required_state_features = torch.zeros((2, 9), dtype=torch.bool)
 
     for episode_number, episode in enumerate(
         dataset._episodes[episode_start:resolved_stop],
@@ -144,10 +163,7 @@ def compute_zscore_statistics(
             break
         meta = dataset._root_meta[episode["root_index"]]
         state_feature_mask = meta["state_element_mask"].reshape(2, 10)[..., :9]
-        if not torch.all(state_feature_mask):
-            raise ValueError(
-                "Statistics currently require all XYZ+Rot6D state elements for both arms."
-            )
+        required_state_features |= state_feature_mask
 
         source_indices = torch.arange(episode["length"], dtype=torch.long)
         state_only_mask = {key: False for key in meta["field_mask"]}
@@ -217,8 +233,8 @@ def compute_zscore_statistics(
                 flush=True,
             )
 
-    state = state_moments.result(std_floor)
-    action = action_moments.result(std_floor)
+    state = state_moments.result(std_floor, required_state_features)
+    action = action_moments.result(std_floor, required_state_features)
     return {
         "schema_version": NGAD_CANONICAL_SCHEMA,
         "state_tcp_mean": state["mean"].tolist(),

@@ -575,7 +575,10 @@ class NGADCanonicalDataset(Dataset):
                 or any(type(enabled) is not bool for enabled in elements)
             ):
                 raise ValueError(f"{path} element_mask[{key!r}] must be bool [20].")
-            if not field_mask[key] and any(elements):
+            # Stored Action is not a physical input: it is always rebuilt from
+            # absolute State. Its output element mask may therefore be enabled
+            # even when field_mask["action"] is false.
+            if key != CANONICAL_ACTION_KEY and not field_mask[key] and any(elements):
                 raise ValueError(
                     f"{path} marks {key} unavailable but enables some of its elements."
                 )

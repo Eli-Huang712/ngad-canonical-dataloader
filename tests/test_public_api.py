@@ -45,6 +45,23 @@ def test_running_moments_matches_population_zscore_statistics() -> None:
     torch.testing.assert_close(result["raw_std"], expected.std(dim=0, correction=0))
 
 
+def test_running_moments_emit_neutral_stats_for_masked_arm() -> None:
+    moments = RunningMoments((2, 9))
+    values = torch.arange(18, dtype=torch.float64).reshape(1, 2, 9)
+    valid = torch.zeros_like(values, dtype=torch.bool)
+    valid[:, 0] = True
+    moments.update(values, valid)
+    required = torch.zeros((2, 9), dtype=torch.bool)
+    required[0] = True
+
+    result = moments.result(1.0e-5, required)
+
+    torch.testing.assert_close(result["mean"][1], torch.zeros(9, dtype=torch.float64))
+    torch.testing.assert_close(result["std"][1], torch.ones(9, dtype=torch.float64))
+    assert result["count"][1].sum() == 0
+    assert not result["std_floor_applied"][1].any()
+
+
 def test_hy_gripper_values_map_to_canonical_openness() -> None:
     tcp = torch.zeros(3, 20)
     tcp[:, 9] = torch.tensor([0.0, 45.0, 90.0])
@@ -412,7 +429,7 @@ def test_canonical_sidecar_produces_tensor_masks(tmp_path) -> None:
     field_mask.update(
         {
             "observation.state": True,
-            "action": True,
+            "action": False,
             CANONICAL_TACTILE_VALUES_KEY: False,
             CANONICAL_TACTILE_DT_KEY: False,
             "timestamp": True,
