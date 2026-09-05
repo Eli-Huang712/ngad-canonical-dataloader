@@ -1,0 +1,17 @@
+dataset:
+  normalization_stats_path: /gpfs/jiuquyun/datasets/PRETRAIN_DATA/LIBERO/dataset_configs/normalization/libero.json
+  dataset_dirs:
+    - name: libero
+      path: /gpfs/jiuquyun/datasets/PRETRAIN_DATA/LIBERO/table_000
+      mask_and_mapping_path: /gpfs/jiuquyun/datasets/PRETRAIN_DATA/LIBERO/dataset_configs/masks/mask_and_mapping_libero.json
+  timeline:
+    rgb_rate_hz: 10
+    action_steps_per_rgb_frame: 2
+    tactile_steps_per_rgb_frame: 8
+    anchor_offset: 0
+    frame_ranges:
+      - [0, 0]
+  split: train
+  validation_split: 0.0
+  validation_seed: 3407
+  max_samples: null

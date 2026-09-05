@@ -228,6 +228,7 @@ class ParquetTableBackend:
                 )
             episode = {
                 "episode_index": episode_index,
+                "tasks": tuple(str(task) for task in task_values),
                 "length": int(row["length"]),
                 "dataset_from_index": int(row["dataset_from_index"]),
                 "dataset_to_index": int(row["dataset_to_index"]),

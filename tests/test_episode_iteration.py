@@ -6,9 +6,16 @@ from ngad_canonical_dataloader import NGADCanonicalDataset
 def _dataset_with_episode_boundaries() -> NGADCanonicalDataset:
     dataset = NGADCanonicalDataset.__new__(NGADCanonicalDataset)
     dataset._episodes = [
-        {"episode_index": 10},
-        {"episode_index": 11},
-        {"episode_index": 12},
+        {"episode_index": 10, "root_index": 0, "tasks": ("task ten",)},
+        {"episode_index": 11, "root_index": 0},
+        {"episode_index": 12, "root_index": 0, "tasks": ("task twelve",)},
+    ]
+    dataset._root_meta = [
+        {
+            "dataset_name": "demo",
+            "table_name": "table_000",
+            "tasks": {10: "task ten", 12: "task twelve"},
+        }
     ]
     dataset._episode_window_ends = [2, 5, 9]
     dataset._length = 7
@@ -56,3 +63,39 @@ def test_iter_episode_samples_rejects_missing_or_ambiguous_episode() -> None:
     dataset._episodes[2]["episode_index"] = 10
     with pytest.raises(ValueError, match="ambiguous across configured tables"):
         list(dataset.iter_episode_samples(10))
+
+
+def test_episode_catalog_uses_metadata_without_loading_samples(monkeypatch) -> None:
+    dataset = _dataset_with_episode_boundaries()
+    monkeypatch.setattr(
+        NGADCanonicalDataset,
+        "__getitem__",
+        lambda self, index: pytest.fail(f"unexpected sample read: {index}"),
+    )
+
+    assert dataset.episode_catalog() == [
+        {
+            "dataset_name": "demo",
+            "table_name": "table_000",
+            "episode_index": 10,
+            "sample_count": 2,
+            "task_indices": [10],
+            "prompts": ["task ten"],
+        },
+        {
+            "dataset_name": "demo",
+            "table_name": "table_000",
+            "episode_index": 11,
+            "sample_count": 3,
+            "task_indices": [],
+            "prompts": [],
+        },
+        {
+            "dataset_name": "demo",
+            "table_name": "table_000",
+            "episode_index": 12,
+            "sample_count": 2,
+            "task_indices": [12],
+            "prompts": ["task twelve"],
+        },
+    ]

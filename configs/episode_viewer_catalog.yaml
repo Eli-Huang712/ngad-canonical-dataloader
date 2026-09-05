@@ -1,0 +1,10 @@
+datasets:
+  - id: umi
+    label: UMI
+    config: umi_selfcollect_episode_view.yaml
+  - id: hy_embodied
+    label: Hy-Embodied
+    config: hy_table_000_episode_view.yaml
+  - id: libero
+    label: LIBERO
+    config: libero_episode_view.yaml

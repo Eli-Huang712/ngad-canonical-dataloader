@@ -445,6 +445,8 @@ class NGADCanonicalDataset(Dataset):
             selected = train_episodes if split == "train" else validation_episodes
             self._root_meta.append(
                 {
+                    "dataset_name": configured["name"],
+                    "table_name": table_record["table_name"],
                     "table_backend": table_backend,
                     "image_backend": image_backend,
                     "tasks": tasks,
@@ -985,6 +987,40 @@ class NGADCanonicalDataset(Dataset):
         stop = min(self._episode_window_ends[episode_position], self._length)
         for sample_index in range(start, stop):
             yield self[sample_index]
+
+    def episode_catalog(self) -> list[dict[str, Any]]:
+        """Return lightweight episode choices without decoding sample payloads.
+
+        Task prompts are included only when the physical episode metadata publishes
+        them. Exact anchor-level ``task_index`` and prompt remain part of each sample
+        and therefore remain correct for episodes whose instruction changes over time.
+        """
+        catalog: list[dict[str, Any]] = []
+        previous_end = 0
+        for position, episode in enumerate(self._episodes):
+            episode_end = min(self._episode_window_ends[position], self._length)
+            sample_count = max(0, episode_end - previous_end)
+            previous_end = self._episode_window_ends[position]
+            if sample_count == 0:
+                continue
+            meta = self._root_meta[episode["root_index"]]
+            prompts = list(episode.get("tasks", ()))
+            task_indices = sorted(
+                task_index
+                for task_index, task_prompt in meta["tasks"].items()
+                if task_prompt in prompts
+            )
+            catalog.append(
+                {
+                    "dataset_name": meta["dataset_name"],
+                    "table_name": meta["table_name"],
+                    "episode_index": int(episode["episode_index"]),
+                    "sample_count": sample_count,
+                    "task_indices": task_indices,
+                    "prompts": prompts,
+                }
+            )
+        return catalog
 
     def normalization_stats(self) -> dict[str, Any] | None:
         """Return the exact canonical statistics serialized with a checkpoint."""
