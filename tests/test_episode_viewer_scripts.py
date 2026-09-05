@@ -46,3 +46,17 @@ def test_episode_visualizer_uses_only_frame_derived_timelines() -> None:
     assert "frame_timestamps" not in script
     assert "if action_step < 0 or not valid[step]:" in script
     assert "if frame_tick < 0:" in script
+
+
+def test_episode_visualizer_groups_stereo_views_with_corresponding_tactile() -> None:
+    script = (REPOSITORY_ROOT / "tools/remote/visualize_episode.py").read_text(
+        encoding="utf-8"
+    )
+    expected_rows = (
+        'rrb.Horizontal(\n                camera_views["cam_head_left"],\n                camera_views["cam_head_right"]',
+        'camera_views["cam_left_wrist_left"],\n                camera_views["cam_left_wrist_right"],\n                tactile_views["left_finger_0"],\n                tactile_views["left_finger_1"]',
+        'camera_views["cam_right_wrist_left"],\n                camera_views["cam_right_wrist_right"],\n                tactile_views["right_finger_0"],\n                tactile_views["right_finger_1"]',
+    )
+    for expected_row in expected_rows:
+        assert expected_row in script
+    assert "rrb.Grid(*camera_views" not in script

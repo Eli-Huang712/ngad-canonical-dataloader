@@ -75,24 +75,26 @@ def _bounded_shear_vectors(force_xy: np.ndarray) -> np.ndarray:
 
 
 def _build_blueprint(camera_keys: tuple[str, ...]) -> rrb.Blueprint:
-    camera_views = [
-        rrb.Spatial2DView(
+    """Arrange stereo cameras and taxels by their physical mounting position."""
+    camera_views = {
+        _entity_name(camera): rrb.Spatial2DView(
             origin=f"/cameras/{_entity_name(camera)}",
             name=_entity_name(camera),
         )
         for camera in camera_keys
-    ]
-    tactile_views = [
-        rrb.Spatial2DView(
+    }
+    tactile_views = {
+        sensor: rrb.Spatial2DView(
             origin=f"/tactile/{sensor}",
             name=sensor,
         )
         for sensor in TACTILE_SENSOR_NAMES
-    ]
+    }
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
-                rrb.Grid(*camera_views, grid_columns=3, name="Six camera views"),
+                camera_views["cam_head_left"],
+                camera_views["cam_head_right"],
                 rrb.Vertical(
                     rrb.TextDocumentView(
                         origin="/episode/prompt",
@@ -103,25 +105,36 @@ def _build_blueprint(camera_keys: tuple[str, ...]) -> rrb.Blueprint:
                         name="Metadata",
                     ),
                 ),
-                column_shares=[3, 1],
+                column_shares=[1, 1, 1],
             ),
             rrb.Horizontal(
-                rrb.Grid(*tactile_views, grid_columns=2, name="Tactile taxels"),
-                rrb.Vertical(
-                    rrb.TimeSeriesView(
-                        origin="/tactile_metrics",
-                        name="Tactile metrics",
-                    ),
-                    rrb.TimeSeriesView(origin="/state", name="State TCP128"),
-                    rrb.TimeSeriesView(origin="/action", name="Action TCP128"),
+                camera_views["cam_left_wrist_left"],
+                camera_views["cam_left_wrist_right"],
+                tactile_views["left_finger_0"],
+                tactile_views["left_finger_1"],
+                column_shares=[1, 1, 1, 1],
+            ),
+            rrb.Horizontal(
+                camera_views["cam_right_wrist_left"],
+                camera_views["cam_right_wrist_right"],
+                tactile_views["right_finger_0"],
+                tactile_views["right_finger_1"],
+                column_shares=[1, 1, 1, 1],
+            ),
+            rrb.Horizontal(
+                rrb.TimeSeriesView(
+                    origin="/tactile_metrics",
+                    name="Tactile metrics",
                 ),
-                column_shares=[1, 1],
+                rrb.TimeSeriesView(origin="/state", name="State TCP128"),
+                rrb.TimeSeriesView(origin="/action", name="Action TCP128"),
+                column_shares=[1, 1, 1],
             ),
             rrb.TextLogView(
                 origin="/annotations",
                 name="Task annotations",
             ),
-            row_shares=[4, 2, 1],
+            row_shares=[2, 2, 2, 2, 1],
         ),
         collapse_panels=True,
     )
