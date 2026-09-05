@@ -75,5 +75,41 @@ def test_browser_close_deletes_current_rrd(tmp_path: Path, monkeypatch) -> None:
     assert state.status() == {"state": "stopped"}
 
 
+def test_browser_requests_only_one_episode_page(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "dataset.yaml").write_text("dataset: {}\n", encoding="utf-8")
+    catalog = tmp_path / "catalog.yaml"
+    catalog.write_text(
+        "datasets:\n  - id: demo\n    label: Demo\n    config: dataset.yaml\n",
+        encoding="utf-8",
+    )
+    visualizer = tmp_path / "visualize_episode.py"
+    visualizer.write_text("", encoding="utf-8")
+    calls = []
+
+    class FakeDataset:
+        def episode_catalog(self, *, page, page_size):
+            calls.append((page, page_size))
+            return {
+                "items": [],
+                "page": page,
+                "page_size": page_size,
+                "total": 250,
+                "total_pages": 3,
+            }
+
+    monkeypatch.setattr(EPISODE_BROWSER.shutil, "which", lambda name: "/bin/true")
+    monkeypatch.setattr(
+        EPISODE_BROWSER,
+        "build_dataset_from_yaml",
+        lambda path: FakeDataset(),
+    )
+    state = EpisodeBrowserState(catalog, tmp_path / "temporary", 19001, 19002, visualizer)
+
+    page = state.episode_choices("demo", 2)
+
+    assert page["page"] == 2
+    assert calls == [(2, 100)]
+
+
 def test_rendered_browser_javascript_preserves_newline_escape() -> None:
     assert "row.prompts.join('\\n')" in EPISODE_BROWSER.INDEX_HTML

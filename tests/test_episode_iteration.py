@@ -65,7 +65,7 @@ def test_iter_episode_samples_rejects_missing_or_ambiguous_episode() -> None:
         list(dataset.iter_episode_samples(10))
 
 
-def test_episode_catalog_uses_metadata_without_loading_samples(monkeypatch) -> None:
+def test_episode_catalog_pages_metadata_without_loading_samples(monkeypatch) -> None:
     dataset = _dataset_with_episode_boundaries()
     monkeypatch.setattr(
         NGADCanonicalDataset,
@@ -73,23 +73,31 @@ def test_episode_catalog_uses_metadata_without_loading_samples(monkeypatch) -> N
         lambda self, index: pytest.fail(f"unexpected sample read: {index}"),
     )
 
-    assert dataset.episode_catalog() == [
-        {
-            "dataset_name": "demo",
-            "table_name": "table_000",
-            "episode_index": 10,
-            "sample_count": 2,
-            "task_indices": [10],
-            "prompts": ["task ten"],
-        },
-        {
-            "dataset_name": "demo",
-            "table_name": "table_000",
-            "episode_index": 11,
-            "sample_count": 3,
-            "task_indices": [],
-            "prompts": [],
-        },
+    assert dataset.episode_catalog(page=1, page_size=2) == {
+        "items": [
+            {
+                "dataset_name": "demo",
+                "table_name": "table_000",
+                "episode_index": 10,
+                "sample_count": 2,
+                "task_indices": [10],
+                "prompts": ["task ten"],
+            },
+            {
+                "dataset_name": "demo",
+                "table_name": "table_000",
+                "episode_index": 11,
+                "sample_count": 3,
+                "task_indices": [],
+                "prompts": [],
+            },
+        ],
+        "page": 1,
+        "page_size": 2,
+        "total": 3,
+        "total_pages": 2,
+    }
+    assert dataset.episode_catalog(page=2, page_size=2)["items"] == [
         {
             "dataset_name": "demo",
             "table_name": "table_000",
@@ -97,5 +105,13 @@ def test_episode_catalog_uses_metadata_without_loading_samples(monkeypatch) -> N
             "sample_count": 2,
             "task_indices": [12],
             "prompts": ["task twelve"],
-        },
+        }
     ]
+
+
+def test_episode_catalog_rejects_invalid_pages() -> None:
+    dataset = _dataset_with_episode_boundaries()
+    with pytest.raises(ValueError, match="page must be a positive integer"):
+        dataset.episode_catalog(page=0, page_size=2)
+    with pytest.raises(ValueError, match="exceeds total_pages"):
+        dataset.episode_catalog(page=3, page_size=2)

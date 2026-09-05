@@ -157,7 +157,8 @@ H100 端按约定将本仓库安装在
 
 脚本会申请 CPU QoS、建立 SSH 端口转发并自动打开浏览器。页面提供 UMI、Hy-Embodied、
 LIBERO 的 Dataset 下拉列表和 Episode 下拉列表；`task_index` 与 prompt 只作为所选
-Episode 的辅助说明。每次选择会先生成完整 episode RRD，再嵌入 Rerun Viewer；切换
+Episode 的辅助说明。Episode 按每页 100 条读取，避免一次创建数万个浏览器选项。每次
+选择会先生成完整 episode RRD，再嵌入 Rerun Viewer；切换
 Episode 或在终端按 `Ctrl-C` 结束任务时，临时 RRD 会被删除。
 
 可视化工具按运行位置分层，但跟随同一 DataLoader commit：

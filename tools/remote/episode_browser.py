@@ -26,6 +26,7 @@ from ngad_canonical_dataloader import build_dataset_from_yaml
 
 
 CATALOG_ID = re.compile(r"[a-z0-9][a-z0-9_-]*")
+EPISODE_PAGE_SIZE = 100
 
 
 @dataclass(frozen=True)
@@ -97,7 +98,6 @@ class EpisodeBrowserState:
             raise RuntimeError("The Rerun CLI is not installed in this environment.")
         self._rerun = rerun
         self._datasets: dict[str, Any] = {}
-        self._episode_catalogs: dict[str, list[dict[str, Any]]] = {}
         self._generation: subprocess.Popen[str] | None = None
         self._viewer: subprocess.Popen[str] | None = None
         self._rrd_path: Path | None = None
@@ -111,22 +111,23 @@ class EpisodeBrowserState:
             for entry in self.entries
         ]
 
-    def episode_choices(self, dataset_id: str) -> list[dict[str, Any]]:
-        """Build one metadata-only episode list and cache it for the session."""
+    def episode_choices(self, dataset_id: str, page: int) -> dict[str, Any]:
+        """Return one metadata-only page while caching only the Dataset instance."""
         with self._lock:
             self._require_entry(dataset_id)
             if dataset_id not in self._datasets:
-                dataset = build_dataset_from_yaml(
+                self._datasets[dataset_id] = build_dataset_from_yaml(
                     self._entry_by_id[dataset_id].config_path
                 )
-                self._datasets[dataset_id] = dataset
-                self._episode_catalogs[dataset_id] = dataset.episode_catalog()
-            return [dict(row) for row in self._episode_catalogs[dataset_id]]
+            return self._datasets[dataset_id].episode_catalog(
+                page=page,
+                page_size=EPISODE_PAGE_SIZE,
+            )
 
-    def start_render(self, dataset_id: str, episode_index: int) -> None:
+    def start_render(self, dataset_id: str, episode_index: int, page: int) -> None:
         """Replace the current preview and generate one full episode asynchronously."""
         episode_index = int(episode_index)
-        choices = self.episode_choices(dataset_id)
+        choices = self.episode_choices(dataset_id, page)["items"]
         if episode_index not in {row["episode_index"] for row in choices}:
             raise KeyError(f"Unknown episode {episode_index} for dataset {dataset_id!r}.")
         with self._lock:
@@ -286,6 +287,9 @@ INDEX_HTML = r"""<!doctype html>
   select, button { width: 100%; margin-top: 6px; padding: 10px; border-radius: 7px; border: 1px solid #474d59; background: #1d2027; color: #fff; }
   button { margin-top: 18px; background: #246bfd; border-color: #246bfd; font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .55; cursor: wait; }
+  .pager { display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: center; margin-top: 8px; }
+  .pager button { margin-top: 0; background: #2a2e37; border-color: #474d59; }
+  #page-label { min-width: 72px; text-align: center; color: #b9c0cc; font-size: 12px; }
   #details, #status { margin-top: 14px; padding: 12px; border-radius: 7px; background: #1a1d23; white-space: pre-wrap; font-size: 12px; line-height: 1.5; }
   #viewer { width: 100%; height: 100%; border: 0; background: #0b0c0f; }
   #empty { display: grid; place-items: center; height: 100%; color: #8f98a8; }
@@ -296,6 +300,11 @@ INDEX_HTML = r"""<!doctype html>
   <h1>NGAD Dataset Viewer</h1>
   <label for="dataset">Dataset</label><select id="dataset"></select>
   <label for="episode">Episode</label><select id="episode"></select>
+  <div class="pager">
+    <button id="previous-page">上一页</button>
+    <span id="page-label">- / -</span>
+    <button id="next-page">下一页</button>
+  </div>
   <div id="details">请选择 Dataset 和 Episode。</div>
   <button id="render">生成并预览</button>
   <div id="status">等待选择。</div>
@@ -308,8 +317,13 @@ const episodeSelect = document.querySelector('#episode');
 const details = document.querySelector('#details');
 const statusBox = document.querySelector('#status');
 const renderButton = document.querySelector('#render');
+const previousPageButton = document.querySelector('#previous-page');
+const nextPageButton = document.querySelector('#next-page');
+const pageLabel = document.querySelector('#page-label');
 const stage = document.querySelector('#stage');
 let episodes = [];
+let currentPage = 1;
+let totalPages = 1;
 
 async function getJson(url, options) {
   const response = await fetch(url, options);
@@ -324,11 +338,19 @@ function showEpisode() {
   const prompts = row.prompts.length ? row.prompts.join('\n') : '按 anchor 在 Rerun 中显示';
   details.textContent = `Episode: ${row.episode_index}\nFrames: ${row.sample_count}\nTask index: ${taskIndices}\nPrompt: ${prompts}`;
 }
-async function loadEpisodes() {
-  renderButton.disabled = true;
+function setControlsDisabled(disabled) {
+  renderButton.disabled = disabled;
+  previousPageButton.disabled = disabled || currentPage <= 1;
+  nextPageButton.disabled = disabled || currentPage >= totalPages;
+}
+async function loadEpisodes(page = 1) {
+  setControlsDisabled(true);
   statusBox.textContent = '正在读取 Episode metadata…';
   try {
-    episodes = await getJson(`/api/episodes?dataset=${encodeURIComponent(datasetSelect.value)}`);
+    const payload = await getJson(`/api/episodes?dataset=${encodeURIComponent(datasetSelect.value)}&page=${page}`);
+    episodes = payload.items;
+    currentPage = payload.page;
+    totalPages = payload.total_pages;
     episodeSelect.replaceChildren(...episodes.map(row => {
       const option = document.createElement('option');
       option.value = row.episode_index;
@@ -337,8 +359,10 @@ async function loadEpisodes() {
       return option;
     }));
     showEpisode();
-    statusBox.textContent = `已载入 ${episodes.length} 个 Episode。`;
+    pageLabel.textContent = `${currentPage} / ${totalPages}`;
+    statusBox.textContent = `共 ${payload.total} 个 Episode；当前显示 ${episodes.length} 个。`;
   } catch (error) { statusBox.textContent = `错误：${error.message}`; }
+  setControlsDisabled(false);
   renderButton.disabled = episodes.length === 0;
 }
 async function pollStatus() {
@@ -349,31 +373,33 @@ async function pollStatus() {
   } else if (payload.state === 'ready') {
     statusBox.textContent = '预览已就绪；切换 Episode 或结束任务时会删除临时 RRD。';
     stage.innerHTML = `<iframe id="viewer" src="${payload.viewer_url}"></iframe>`;
-    renderButton.disabled = false;
+    setControlsDisabled(false);
   } else if (payload.state === 'error') {
     statusBox.textContent = `错误：${payload.message}`;
-    renderButton.disabled = false;
+    setControlsDisabled(false);
   }
 }
-datasetSelect.addEventListener('change', loadEpisodes);
+datasetSelect.addEventListener('change', () => loadEpisodes(1));
 episodeSelect.addEventListener('change', showEpisode);
+previousPageButton.addEventListener('click', () => loadEpisodes(currentPage - 1));
+nextPageButton.addEventListener('click', () => loadEpisodes(currentPage + 1));
 renderButton.addEventListener('click', async () => {
-  renderButton.disabled = true;
+  setControlsDisabled(true);
   stage.innerHTML = '<div id="empty">正在生成完整 RRD…</div>';
   try {
     await getJson('/api/render', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({dataset_id: datasetSelect.value, episode_index: Number(episodeSelect.value)})
+      body: JSON.stringify({dataset_id: datasetSelect.value, episode_index: Number(episodeSelect.value), page: currentPage})
     });
     pollStatus();
-  } catch (error) { statusBox.textContent = `错误：${error.message}`; renderButton.disabled = false; }
+  } catch (error) { statusBox.textContent = `错误：${error.message}`; setControlsDisabled(false); }
 });
 (async () => {
   const datasets = await getJson('/api/datasets');
   datasetSelect.replaceChildren(...datasets.map(row => {
     const option = document.createElement('option'); option.value = row.id; option.textContent = row.label; return option;
   }));
-  await loadEpisodes();
+  await loadEpisodes(1);
 })();
 </script></body></html>
 """
@@ -391,8 +417,13 @@ def make_handler(state: EpisodeBrowserState) -> type[BaseHTTPRequestHandler]:
                 elif parsed.path == "/api/datasets":
                     self._send_json(HTTPStatus.OK, state.dataset_choices())
                 elif parsed.path == "/api/episodes":
-                    dataset_id = parse_qs(parsed.query).get("dataset", [""])[0]
-                    self._send_json(HTTPStatus.OK, state.episode_choices(dataset_id))
+                    query = parse_qs(parsed.query)
+                    dataset_id = query.get("dataset", [""])[0]
+                    page = int(query.get("page", ["1"])[0])
+                    self._send_json(
+                        HTTPStatus.OK,
+                        state.episode_choices(dataset_id, page),
+                    )
                 elif parsed.path == "/api/status":
                     self._send_json(HTTPStatus.OK, state.status())
                 else:
@@ -412,9 +443,16 @@ def make_handler(state: EpisodeBrowserState) -> type[BaseHTTPRequestHandler]:
                 if not isinstance(payload, dict) or set(payload) != {
                     "dataset_id",
                     "episode_index",
+                    "page",
                 }:
-                    raise ValueError("Render payload must contain dataset_id and episode_index.")
-                state.start_render(str(payload["dataset_id"]), int(payload["episode_index"]))
+                    raise ValueError(
+                        "Render payload must contain dataset_id, episode_index, and page."
+                    )
+                state.start_render(
+                    str(payload["dataset_id"]),
+                    int(payload["episode_index"]),
+                    int(payload["page"]),
+                )
                 self._send_json(HTTPStatus.ACCEPTED, state.status())
             except (KeyError, ValueError, RuntimeError, json.JSONDecodeError) as error:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})

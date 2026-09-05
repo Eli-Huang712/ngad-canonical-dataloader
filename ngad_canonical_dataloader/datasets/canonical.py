@@ -988,21 +988,41 @@ class NGADCanonicalDataset(Dataset):
         for sample_index in range(start, stop):
             yield self[sample_index]
 
-    def episode_catalog(self) -> list[dict[str, Any]]:
-        """Return lightweight episode choices without decoding sample payloads.
+    def episode_catalog(
+        self,
+        *,
+        page: int,
+        page_size: int,
+    ) -> dict[str, Any]:
+        """Return one lightweight episode page without decoding sample payloads.
 
         Task prompts are included only when the physical episode metadata publishes
         them. Exact anchor-level ``task_index`` and prompt remain part of each sample
         and therefore remain correct for episodes whose instruction changes over time.
         """
-        catalog: list[dict[str, Any]] = []
-        previous_end = 0
-        for position, episode in enumerate(self._episodes):
+        if type(page) is not int or page <= 0:
+            raise ValueError("episode catalog page must be a positive integer.")
+        if type(page_size) is not int or page_size <= 0:
+            raise ValueError("episode catalog page_size must be a positive integer.")
+        visible_episode_count = bisect_right(
+            self._episode_window_ends,
+            self._length - 1,
+        ) + 1
+        total_pages = math.ceil(visible_episode_count / page_size)
+        if page > total_pages:
+            raise ValueError(
+                f"episode catalog page {page} exceeds total_pages {total_pages}."
+            )
+        page_start = (page - 1) * page_size
+        page_stop = min(page_start + page_size, visible_episode_count)
+        items: list[dict[str, Any]] = []
+        for position in range(page_start, page_stop):
+            episode = self._episodes[position]
             episode_end = min(self._episode_window_ends[position], self._length)
+            previous_end = (
+                0 if position == 0 else self._episode_window_ends[position - 1]
+            )
             sample_count = max(0, episode_end - previous_end)
-            previous_end = self._episode_window_ends[position]
-            if sample_count == 0:
-                continue
             meta = self._root_meta[episode["root_index"]]
             prompts = list(episode.get("tasks", ()))
             task_indices = sorted(
@@ -1010,7 +1030,7 @@ class NGADCanonicalDataset(Dataset):
                 for task_index, task_prompt in meta["tasks"].items()
                 if task_prompt in prompts
             )
-            catalog.append(
+            items.append(
                 {
                     "dataset_name": meta["dataset_name"],
                     "table_name": meta["table_name"],
@@ -1020,7 +1040,13 @@ class NGADCanonicalDataset(Dataset):
                     "prompts": prompts,
                 }
             )
-        return catalog
+        return {
+            "items": items,
+            "page": page,
+            "page_size": page_size,
+            "total": visible_episode_count,
+            "total_pages": total_pages,
+        }
 
     def normalization_stats(self) -> dict[str, Any] | None:
         """Return the exact canonical statistics serialized with a checkpoint."""
