@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serve Dataset/Episode selection and one temporary Rerun recording."""
+"""Serve H100-side Dataset/Episode selection and one temporary Rerun recording."""
 
 from __future__ import annotations
 

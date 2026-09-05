@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write one Dataset episode to a reusable Rerun recording."""
+"""Write one Dataset episode to an H100-side temporary Rerun recording."""
 
 from __future__ import annotations
 

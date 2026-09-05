@@ -7,8 +7,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 def test_episode_viewer_shell_scripts_have_valid_syntax() -> None:
     for relative_path in (
-        "tools/serve_episode_slurm.sh",
-        "tools/view-h100",
+        "tools/remote/serve_episode_slurm.sh",
+        "tools/local/view-h100",
     ):
         subprocess.run(
             ["bash", "-n", str(REPOSITORY_ROOT / relative_path)],
@@ -17,10 +17,10 @@ def test_episode_viewer_shell_scripts_have_valid_syntax() -> None:
 
 
 def test_slurm_service_uses_disposable_selector_path() -> None:
-    script = (REPOSITORY_ROOT / "tools/serve_episode_slurm.sh").read_text(
+    script = (REPOSITORY_ROOT / "tools/remote/serve_episode_slurm.sh").read_text(
         encoding="utf-8"
     )
-    assert "tools/episode_browser.py" in script
+    assert "tools/remote/episode_browser.py" in script
     assert "ngad_episode_viewer_${job_id}" in script
     assert 'trap cleanup EXIT INT TERM' in script
     assert "<dataset-yaml> <episode-index>" not in script

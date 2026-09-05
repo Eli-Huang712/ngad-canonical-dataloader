@@ -43,7 +43,7 @@ artifacts='$remote_artifacts'
 test -d \"\$repo/.git\"
 mkdir -p \"\$artifacts/logs\"
 cd \"\$repo\"
-job=\$(sbatch --parsable --output=\"\$artifacts/logs/%j.out\" tools/serve_episode_slurm.sh configs/episode_viewer_catalog.yaml)
+job=\$(sbatch --parsable --output=\"\$artifacts/logs/%j.out\" tools/remote/serve_episode_slurm.sh configs/episode_viewer_catalog.yaml)
 job=\${job%%;*}
 printf '%s|%s/logs/%s.out\\n' \"\$job\" \"\$artifacts\" \"\$job\"
 ")

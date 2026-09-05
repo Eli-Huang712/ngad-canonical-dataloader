@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.episode_browser import EpisodeBrowserState, load_viewer_catalog
+from tools.remote.episode_browser import EpisodeBrowserState, load_viewer_catalog
 
 
 def test_viewer_catalog_resolves_dataset_yaml_relative_to_catalog(tmp_path: Path) -> None:
@@ -53,7 +53,10 @@ def test_browser_close_deletes_current_rrd(tmp_path: Path, monkeypatch) -> None:
     )
     visualizer = tmp_path / "visualize_episode.py"
     visualizer.write_text("", encoding="utf-8")
-    monkeypatch.setattr("tools.episode_browser.shutil.which", lambda name: "/bin/true")
+    monkeypatch.setattr(
+        "tools.remote.episode_browser.shutil.which",
+        lambda name: "/bin/true",
+    )
     state = EpisodeBrowserState(catalog, tmp_path / "temporary", 19001, 19002, visualizer)
     recording = tmp_path / "temporary" / "episode.rrd"
     recording.write_bytes(b"recording")

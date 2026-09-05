@@ -10,7 +10,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-    echo "Usage: sbatch tools/serve_episode_slurm.sh <viewer-catalog-yaml>" >&2
+    echo "Usage: sbatch tools/remote/serve_episode_slurm.sh <viewer-catalog-yaml>" >&2
     exit 2
 fi
 
@@ -50,7 +50,7 @@ echo "SELECTOR_PORT=$selector_port"
 echo "WEB_PORT=$web_port"
 echo "GRPC_PORT=$grpc_port"
 
-python "$repo_root/tools/episode_browser.py" \
+python "$repo_root/tools/remote/episode_browser.py" \
     --catalog "$viewer_catalog" \
     --temporary-directory "$temporary_directory" \
     --port "$selector_port" \
