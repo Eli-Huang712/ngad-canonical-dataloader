@@ -21,6 +21,7 @@ canonical = [
     "pyarrow",
 ]
 test = ["pytest"]
+visualize = ["rerun-sdk>=0.26,<0.27"]
 
 [tool.setuptools.packages.find]
 include = ["ngad_canonical_dataloader*"]

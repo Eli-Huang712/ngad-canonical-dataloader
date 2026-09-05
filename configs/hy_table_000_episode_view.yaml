@@ -1,0 +1,17 @@
+dataset:
+  normalization_stats_path: /gpfs/jiuquyun/datasets/PRETRAIN_DATA/Hy-Embodied-0.5-VLA-Data/dataset_configs/normalization/table_000.json
+  dataset_dirs:
+    - name: hy_table_000
+      path: /gpfs/jiuquyun/datasets/PRETRAIN_DATA/Hy-Embodied-0.5-VLA-Data/table_000
+      mask_and_mapping_path: /gpfs/jiuquyun/datasets/PRETRAIN_DATA/Hy-Embodied-0.5-VLA-Data/dataset_configs/masks/mask_and_mapping_hy_table_000.json
+  timeline:
+    rgb_rate_hz: 10
+    action_steps_per_rgb_frame: 2
+    tactile_steps_per_rgb_frame: 8
+    anchor_offset: 0
+    frame_ranges:
+      - [0, 0]
+  split: train
+  validation_split: 0.0
+  validation_seed: 3407
+  max_samples: null
