@@ -26,6 +26,7 @@ rrd_path="${output_dir}/episode_${episode_index}_job_${job_id}.rrd"
 
 umask 0027
 mkdir -p "$output_dir"
+export PYTHONPATH="${repo_root}${PYTHONPATH:+:${PYTHONPATH}}"
 
 python "$repo_root/tools/visualize_episode.py" \
     --dataset-config "$dataset_config" \
