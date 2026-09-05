@@ -27,6 +27,7 @@ browser_pid=""
 
 umask 0027
 mkdir -p "$temporary_directory"
+export PATH="${repo_root}/.venv/bin:${PATH}"
 export PYTHONPATH="${repo_root}${PYTHONPATH:+:${PYTHONPATH}}"
 
 cleanup() {

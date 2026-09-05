@@ -22,5 +22,6 @@ def test_slurm_service_uses_disposable_selector_path() -> None:
     )
     assert "tools/remote/episode_browser.py" in script
     assert "ngad_episode_viewer_${job_id}" in script
+    assert 'export PATH="${repo_root}/.venv/bin:${PATH}"' in script
     assert 'trap cleanup EXIT INT TERM' in script
     assert "<dataset-yaml> <episode-index>" not in script
