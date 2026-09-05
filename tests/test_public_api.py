@@ -608,6 +608,8 @@ def test_tactile_events_align_to_fixed_rgb_slots_without_compaction() -> None:
         candidate_source_indices=torch.tensor([[1, 2, 3]]),
         frame_valid=torch.tensor([True]),
         timestamp_start=torch.tensor(0.0, dtype=torch.float64),
+        source_fps=30.0,
+        use_stored_source_timestamps=True,
         tactile_available=True,
     )
 
@@ -623,6 +625,27 @@ def test_tactile_events_align_to_fixed_rgb_slots_without_compaction() -> None:
     assert torch.count_nonzero(values[0, 1, 3]) == 0
     assert dt[0, 1, 3] == 0
     assert valid[0, 1].sum() == 7
+
+    irregular_rows = {
+        row_index: {
+            **row,
+            "timestamp": float(row["timestamp"]) + (1.0 / 30.0 if row_index >= 2 else 0.0),
+        }
+        for row_index, row in rows.items()
+    }
+    frame_values, frame_dt, frame_valid = dataset._align_tactile_to_rgb_frames(
+        irregular_rows,
+        frame_indices=torch.tensor([1]),
+        candidate_source_indices=torch.tensor([[1, 2, 3]]),
+        frame_valid=torch.tensor([True]),
+        timestamp_start=torch.tensor(0.0, dtype=torch.float64),
+        source_fps=30.0,
+        use_stored_source_timestamps=False,
+        tactile_available=True,
+    )
+    torch.testing.assert_close(frame_values, values)
+    torch.testing.assert_close(frame_dt, dt)
+    torch.testing.assert_close(frame_valid, valid)
 
 
 def test_dataset_returns_one_frame_aligned_timeline(tmp_path, monkeypatch) -> None:
