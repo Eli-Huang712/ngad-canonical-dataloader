@@ -28,10 +28,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+if [[ ! "$remote_repo" =~ ^[A-Za-z0-9_./-]+$ ]]; then
+    echo "NGAD_H100_REPO contains unsupported path characters." >&2
+    exit 2
+fi
 case "$remote_repo" in
-    /gpfs/jiuquyun/projects/*/ngad-canonical-dataloader) ;;
+    "/gpfs/jiuquyun/projects/${remote_user}/"*) ;;
     *)
-        echo "NGAD_H100_REPO must point to a user's ngad-canonical-dataloader checkout." >&2
+        echo "NGAD_H100_REPO must stay inside the remote user's projects directory." >&2
         exit 2
         ;;
 esac

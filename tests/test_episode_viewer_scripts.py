@@ -25,3 +25,9 @@ def test_slurm_service_uses_disposable_selector_path() -> None:
     assert 'export PATH="${repo_root}/.venv/bin:${PATH}"' in script
     assert 'trap cleanup EXIT INT TERM' in script
     assert "<dataset-yaml> <episode-index>" not in script
+
+
+def test_local_launcher_accepts_only_personal_project_checkouts() -> None:
+    script = (REPOSITORY_ROOT / "tools/local/view-h100").read_text(encoding="utf-8")
+    assert "NGAD_H100_REPO" in script
+    assert '"/gpfs/jiuquyun/projects/${remote_user}/"*' in script
