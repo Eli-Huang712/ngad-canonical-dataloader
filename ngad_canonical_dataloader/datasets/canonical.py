@@ -728,6 +728,8 @@ class NGADCanonicalDataset(Dataset):
         candidate_source_indices: torch.Tensor,
         frame_valid: torch.Tensor,
         timestamp_start: torch.Tensor,
+        source_fps: float,
+        use_stored_source_timestamps: bool,
         tactile_available: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Map packed source tactile events onto fixed causal RGB-frame slots."""
@@ -799,7 +801,11 @@ class NGADCanonicalDataset(Dataset):
                         "Canonical tactile dt must have shape "
                         f"{expected_dt_shape}, got {tuple(source_dt.shape)}."
                     )
-                row_timestamp = float(row["timestamp"])
+                row_timestamp = (
+                    float(row["timestamp"])
+                    if use_stored_source_timestamps
+                    else episode_start + source_index / source_fps
+                )
                 for sensor in range(TACTILE_SENSOR_COUNT):
                     for source_slot in range(TACTILE_SOURCE_STEPS_PER_ROW):
                         relative_dt = float(source_dt[sensor, source_slot])
@@ -959,11 +965,11 @@ class NGADCanonicalDataset(Dataset):
         self,
         episode_index: int,
     ) -> Iterator[dict[str, Any]]:
-        """Yield existing ``__getitem__`` samples for one physical episode.
+        """Yield frame-indexed visualization samples for one physical episode.
 
-        This read-only view only translates the episode boundary into the
-        Dataset's global sample indices. Sample construction remains exclusively
-        owned by ``__getitem__`` so training behavior and output ABI are unchanged.
+        Visualization intentionally follows canonical frame indices so acquisition
+        timestamp jitter or dropped capture clocks do not prevent inspecting an
+        episode. Normal training access through ``__getitem__`` remains strict.
         """
         matches = [
             position
@@ -986,7 +992,10 @@ class NGADCanonicalDataset(Dataset):
         )
         stop = min(self._episode_window_ends[episode_position], self._length)
         for sample_index in range(start, stop):
-            yield self[sample_index]
+            yield self._get_sample(
+                sample_index,
+                validate_source_timestamps=False,
+            )
 
     def episode_catalog(
         self,
@@ -1118,6 +1127,7 @@ class NGADCanonicalDataset(Dataset):
         source_frame_indices: torch.Tensor,
         rows: dict[int, dict[str, Any]],
         current_row: dict[str, Any],
+        episode_timestamp_start: torch.Tensor,
     ) -> dict[str, Any]:
         """Assemble the shared six-camera and frame-metadata sample fields."""
         source_fps = meta["source_fps"]
@@ -1159,9 +1169,6 @@ class NGADCanonicalDataset(Dataset):
 
         task_index = int(current_row["task_index"])
         task = meta["tasks"][task_index]
-        episode_timestamp_start = torch.as_tensor(
-            rows[0]["timestamp"], dtype=torch.float64
-        ).reshape(())
         anchor_timestamp = (
             episode_timestamp_start + anchor_rgb_index / self.rgb_rate_hz
         )
@@ -1201,7 +1208,13 @@ class NGADCanonicalDataset(Dataset):
             },
         }
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
+    def _get_sample(
+        self,
+        index: int,
+        *,
+        validate_source_timestamps: bool,
+    ) -> dict[str, Any]:
+        """Construct one strict training sample or frame-indexed visual sample."""
         episode, anchor_rgb_index = self._locate_window(index)
         timeline = timeline_sample_indices(
             anchor_rgb_index,
@@ -1281,16 +1294,25 @@ class NGADCanonicalDataset(Dataset):
             self.camera_keys,
             meta["camera_mask"],
         )
-        source_timestamps = torch.tensor(
-            [rows[int(frame)]["timestamp"] for frame in requested.tolist()],
-            dtype=torch.float64,
-        ).reshape(-1)
-        self._validate_sample_timestamps(
-            episode,
-            requested,
-            source_timestamps,
-            torch.as_tensor(rows[0]["timestamp"], dtype=torch.float64).reshape(()),
-        )
+        stored_timestamp_start = torch.as_tensor(
+            rows[0]["timestamp"], dtype=torch.float64
+        ).reshape(())
+        if validate_source_timestamps:
+            source_timestamps = torch.tensor(
+                [rows[int(frame)]["timestamp"] for frame in requested.tolist()],
+                dtype=torch.float64,
+            ).reshape(-1)
+            self._validate_sample_timestamps(
+                episode,
+                requested,
+                source_timestamps,
+                stored_timestamp_start,
+            )
+            episode_timestamp_start = stored_timestamp_start
+        else:
+            # The visualization iterator uses a nominal zero-based frame clock.
+            # Training never reaches this branch and keeps the source-time check.
+            episode_timestamp_start = torch.zeros((), dtype=torch.float64)
         current_row = rows[int(anchor_source_index.item())]
         sample = self._build_video_sample(
             episode,
@@ -1300,6 +1322,7 @@ class NGADCanonicalDataset(Dataset):
             source_frame_indices,
             rows,
             current_row,
+            episode_timestamp_start,
         )
         if self.video_only:
             return sample
@@ -1317,7 +1340,9 @@ class NGADCanonicalDataset(Dataset):
             timeline.frame_indices,
             tactile_source_indices,
             timeline.frame_valid,
-            torch.as_tensor(rows[0]["timestamp"], dtype=torch.float64).reshape(()),
+            episode_timestamp_start,
+            source_fps,
+            validate_source_timestamps,
             tactile_available,
         )
         absolute_state_grid = interpolate_canonical_tcp(
@@ -1377,3 +1402,7 @@ class NGADCanonicalDataset(Dataset):
             "tactile_field_mask": tactile_mask,
         })
         return sample
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        """Return one training sample with strict source timestamp validation."""
+        return self._get_sample(index, validate_source_timestamps=True)

@@ -33,3 +33,14 @@ def test_local_launcher_accepts_only_personal_project_checkouts() -> None:
     assert '""":' not in script
     assert "NGAD_H100_REPO" in script
     assert '"/gpfs/jiuquyun/projects/${remote_user}/"*' in script
+
+
+def test_episode_visualizer_uses_only_frame_derived_timelines() -> None:
+    script = (REPOSITORY_ROOT / "tools/remote/visualize_episode.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'rr.set_time("frame", sequence=frame_index)' in script
+    assert 'rr.set_time("frame_tick"' in script
+    assert '"episode_time"' not in script
+    assert "action_timestamps" not in script
+    assert "frame_timestamps" not in script

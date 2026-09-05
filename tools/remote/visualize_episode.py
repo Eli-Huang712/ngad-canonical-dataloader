@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from itertools import chain
+from math import lcm
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,6 @@ from ngad_canonical_dataloader import build_dataset_from_yaml
 
 
 TACTILE_VALUES_KEY = "observation.tactile.values"
-TACTILE_DT_KEY = "observation.tactile.dt"
 TACTILE_SENSOR_NAMES = (
     "left_finger_0",
     "left_finger_1",
@@ -137,17 +137,30 @@ def _log_masks(sample: dict[str, Any], camera_keys: tuple[str, ...]) -> None:
         )
 
 
-def _log_tcp_series(sample: dict[str, Any], episode_start: float) -> None:
+def _ticks_per_rgb_frame(sample: dict[str, Any]) -> int:
+    """Return an integer frame subdivision shared by action and tactile slots."""
+    action_steps = int(sample["data_info"]["action_steps_per_rgb_frame"])
+    tactile_steps = int(sample["data_info"]["tactile_steps_per_rgb_frame"])
+    return 2 * lcm(action_steps, tactile_steps)
+
+
+def _log_tcp_series(sample: dict[str, Any], ticks_per_frame: int) -> None:
     if "state" not in sample or "action" not in sample:
         return
-    timestamps = sample["action_timestamps"][0].detach().cpu().numpy()
+    step_offsets = sample["action_step_offsets"][0].detach().cpu().numpy()
     valid = sample["action_valid"][0].detach().cpu().numpy()
     state = sample["state"][0].detach().cpu().numpy()
     action = sample["action"][0].detach().cpu().numpy()
     state_mask = sample["state_feature_mask"].detach().cpu().numpy()
     action_mask = sample["action_feature_mask"].detach().cpu().numpy()
-    for step, timestamp in enumerate(timestamps):
-        rr.set_time("episode_time", duration=float(timestamp) - episode_start)
+    frame_index = int(sample["data_info"]["anchor_rgb_index"])
+    steps_per_frame = int(sample["data_info"]["action_steps_per_rgb_frame"])
+    for step, step_offset in enumerate(step_offsets):
+        action_step = frame_index * steps_per_frame + int(step_offset)
+        rr.set_time(
+            "frame_tick",
+            sequence=action_step * ticks_per_frame // steps_per_frame,
+        )
         for arm_index, arm_name in enumerate(("left", "right")):
             for feature_index, feature_name in enumerate(TCP_FEATURE_NAMES):
                 packed_index = arm_index * len(TCP_FEATURE_NAMES) + feature_index
@@ -163,7 +176,7 @@ def _log_tcp_series(sample: dict[str, Any], episode_start: float) -> None:
                     )
 
 
-def _log_tactile(sample: dict[str, Any], episode_start: float) -> None:
+def _log_tactile(sample: dict[str, Any], ticks_per_frame: int) -> None:
     if TACTILE_VALUES_KEY not in sample:
         return
     field_mask = sample["tactile_field_mask"].detach().cpu().numpy()
@@ -176,26 +189,22 @@ def _log_tactile(sample: dict[str, Any], episode_start: float) -> None:
         return
 
     values = sample[TACTILE_VALUES_KEY][0].detach().cpu().numpy()
-    tactile_dt = sample[TACTILE_DT_KEY][0].detach().cpu().numpy()
     valid = sample["tactile_valid"][0].detach().cpu().numpy()
-    frame_timestamp = float(sample["frame_timestamps"][0])
-    rgb_rate_hz = float(sample["data_info"]["rgb_rate_hz"])
-    tactile_rate_hz = float(sample["data_info"]["tactile_rate_hz"])
+    frame_index = int(sample["data_info"]["anchor_rgb_index"])
+    tactile_steps = values.shape[1]
 
     for sensor_index, sensor_name in enumerate(TACTILE_SENSOR_NAMES):
         for slot in range(values.shape[1]):
+            frame_tick = (
+                frame_index * ticks_per_frame
+                - ticks_per_frame
+                + (2 * slot + 1) * ticks_per_frame // (2 * tactile_steps)
+            )
+            rr.set_time("frame_tick", sequence=frame_tick)
             if not valid[sensor_index, slot]:
-                slot_time = (
-                    frame_timestamp
-                    - 1.0 / rgb_rate_hz
-                    + (slot + 0.5) / tactile_rate_hz
-                )
-                rr.set_time("episode_time", duration=slot_time - episode_start)
                 rr.log(f"/tactile/{sensor_name}", rr.Clear(recursive=True))
                 continue
 
-            event_time = frame_timestamp + float(tactile_dt[sensor_index, slot])
-            rr.set_time("episode_time", duration=event_time - episode_start)
             taxels = values[sensor_index, slot]
             position_xy = taxels[:, :2]
             force = taxels[:, 3:6]
@@ -270,13 +279,12 @@ def log_episode(dataset_config: Path, episode_index: int, output: Path) -> None:
     rr.save(output, default_blueprint=blueprint)
     _log_masks(first, camera_keys)
 
-    episode_start = float(first["data_info"]["anchor_timestamp"])
+    ticks_per_frame = _ticks_per_rgb_frame(first)
     previous_prompt: str | None = None
     for sample in chain((first,), samples):
         frame_index = int(sample["data_info"]["anchor_rgb_index"])
-        timestamp = float(sample["data_info"]["anchor_timestamp"])
         rr.set_time("frame", sequence=frame_index)
-        rr.set_time("episode_time", duration=timestamp - episode_start)
+        rr.set_time("frame_tick", sequence=frame_index * ticks_per_frame)
 
         for camera_index, camera in enumerate(camera_keys):
             rr.log(
@@ -304,7 +312,8 @@ def log_episode(dataset_config: Path, episode_index: int, output: Path) -> None:
             f"### Episode {int(info['episode_index'])}\n\n"
             f"- frame: `{frame_index}`\n"
             f"- task_index: `{int(info['task_index'])}`\n"
-            f"- timestamp: `{timestamp:.6f}`\n"
+            f"- frame_tick: `{frame_index * ticks_per_frame}`\n"
+            f"- ticks_per_rgb_frame: `{ticks_per_frame}`\n"
             f"- camera_mask: `{camera_mask}`\n"
             f"- sample_mode: `{info['sample_mode']}`"
         )
@@ -312,8 +321,8 @@ def log_episode(dataset_config: Path, episode_index: int, output: Path) -> None:
             "/episode/metadata",
             rr.TextDocument(metadata, media_type="text/markdown"),
         )
-        _log_tcp_series(sample, episode_start)
-        _log_tactile(sample, episode_start)
+        _log_tcp_series(sample, ticks_per_frame)
+        _log_tactile(sample, ticks_per_frame)
 
 
 def _parse_args() -> argparse.Namespace:

@@ -22,12 +22,18 @@ def _dataset_with_episode_boundaries() -> NGADCanonicalDataset:
     return dataset
 
 
-def test_iter_episode_samples_reuses_global_getitem_indices(monkeypatch) -> None:
+def test_iter_episode_samples_uses_frame_indexed_sample_path(monkeypatch) -> None:
     dataset = _dataset_with_episode_boundaries()
+    calls = []
+
+    def fake_get_sample(self, index, *, validate_source_timestamps):
+        calls.append((index, validate_source_timestamps))
+        return {"sample_index": index}
+
     monkeypatch.setattr(
         NGADCanonicalDataset,
-        "__getitem__",
-        lambda self, index: {"sample_index": index},
+        "_get_sample",
+        fake_get_sample,
     )
 
     samples = list(dataset.iter_episode_samples(11))
@@ -37,6 +43,7 @@ def test_iter_episode_samples_reuses_global_getitem_indices(monkeypatch) -> None
         {"sample_index": 3},
         {"sample_index": 4},
     ]
+    assert calls == [(2, False), (3, False), (4, False)]
     assert dataset._episode_window_ends == [2, 5, 9]
     assert len(dataset) == 7
 
@@ -45,14 +52,31 @@ def test_iter_episode_samples_respects_max_samples(monkeypatch) -> None:
     dataset = _dataset_with_episode_boundaries()
     monkeypatch.setattr(
         NGADCanonicalDataset,
-        "__getitem__",
-        lambda self, index: {"sample_index": index},
+        "_get_sample",
+        lambda self, index, *, validate_source_timestamps: {
+            "sample_index": index,
+            "validate_source_timestamps": validate_source_timestamps,
+        },
     )
 
     assert list(dataset.iter_episode_samples(12)) == [
-        {"sample_index": 5},
-        {"sample_index": 6},
+        {"sample_index": 5, "validate_source_timestamps": False},
+        {"sample_index": 6, "validate_source_timestamps": False},
     ]
+
+
+def test_getitem_keeps_strict_source_timestamp_validation(monkeypatch) -> None:
+    dataset = _dataset_with_episode_boundaries()
+    monkeypatch.setattr(
+        NGADCanonicalDataset,
+        "_get_sample",
+        lambda self, index, *, validate_source_timestamps: (
+            index,
+            validate_source_timestamps,
+        ),
+    )
+
+    assert dataset[3] == (3, True)
 
 
 def test_iter_episode_samples_rejects_missing_or_ambiguous_episode() -> None:
