@@ -1,8 +1,18 @@
+import importlib.util
 from pathlib import Path
+import sys
 
 import pytest
 
-from tools.remote.episode_browser import EpisodeBrowserState, load_viewer_catalog
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "tools/remote/episode_browser.py"
+MODULE_SPEC = importlib.util.spec_from_file_location("episode_browser", MODULE_PATH)
+assert MODULE_SPEC is not None and MODULE_SPEC.loader is not None
+EPISODE_BROWSER = importlib.util.module_from_spec(MODULE_SPEC)
+sys.modules[MODULE_SPEC.name] = EPISODE_BROWSER
+MODULE_SPEC.loader.exec_module(EPISODE_BROWSER)
+EpisodeBrowserState = EPISODE_BROWSER.EpisodeBrowserState
+load_viewer_catalog = EPISODE_BROWSER.load_viewer_catalog
 
 
 def test_viewer_catalog_resolves_dataset_yaml_relative_to_catalog(tmp_path: Path) -> None:
@@ -53,10 +63,7 @@ def test_browser_close_deletes_current_rrd(tmp_path: Path, monkeypatch) -> None:
     )
     visualizer = tmp_path / "visualize_episode.py"
     visualizer.write_text("", encoding="utf-8")
-    monkeypatch.setattr(
-        "tools.remote.episode_browser.shutil.which",
-        lambda name: "/bin/true",
-    )
+    monkeypatch.setattr(EPISODE_BROWSER.shutil, "which", lambda name: "/bin/true")
     state = EpisodeBrowserState(catalog, tmp_path / "temporary", 19001, 19002, visualizer)
     recording = tmp_path / "temporary" / "episode.rrd"
     recording.write_bytes(b"recording")
