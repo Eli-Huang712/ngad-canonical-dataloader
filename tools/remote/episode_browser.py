@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -176,12 +177,53 @@ class EpisodeBrowserState:
             process.kill()
             process.wait(timeout=10)
 
+    @staticmethod
+    def _stop_viewer_process_group(process: subprocess.Popen[str] | None) -> None:
+        """Terminate the Rerun CLI and any proxy child that still owns its ports."""
+        if process is None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=10)
+
     def _discard_preview_locked(self) -> None:
-        self._stop_process(self._viewer)
+        self._stop_viewer_process_group(self._viewer)
         self._viewer = None
         if self._rrd_path is not None:
             self._rrd_path.unlink(missing_ok=True)
             self._rrd_path = None
+
+    def _open_viewer_ports(self) -> list[int]:
+        open_ports = []
+        for port in (self._web_port, self._grpc_port):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+                    open_ports.append(port)
+            except OSError:
+                pass
+        return open_ports
+
+    def _wait_for_viewer_ports_to_close(self) -> None:
+        """Reject a reload until the previous web and gRPC listeners are gone."""
+        deadline = time.monotonic() + 10.0
+        while True:
+            open_ports = self._open_viewer_ports()
+            if not open_ports:
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Previous Rerun viewer still owns ports {open_ports}."
+                )
+            time.sleep(0.25)
 
     def _render_worker(self, dataset_id: str, episode_index: int) -> None:
         entry = self._require_entry(dataset_id)
@@ -209,6 +251,8 @@ class EpisodeBrowserState:
                     return
                 self._generation = generation
             output, _ = generation.communicate()
+            if generation.returncode == 0:
+                self._wait_for_viewer_ports_to_close()
             with self._lock:
                 self._generation = None
                 if self._closing:
@@ -235,6 +279,7 @@ class EpisodeBrowserState:
                         "webgl",
                     ],
                     text=True,
+                    start_new_session=True,
                 )
             self._wait_for_viewer()
             with self._lock:
@@ -248,6 +293,7 @@ class EpisodeBrowserState:
                 }
         except Exception as error:
             with self._lock:
+                self._generation = None
                 if not self._closing:
                     self._status = {"state": "error", "message": str(error)}
                 self._discard_preview_locked()
@@ -263,6 +309,10 @@ class EpisodeBrowserState:
                 raise RuntimeError("Rerun viewer exited before becoming ready.")
             try:
                 with socket.create_connection(("127.0.0.1", self._web_port), timeout=0.5):
+                    # A stale listener can answer before a failed replacement exits.
+                    time.sleep(0.25)
+                    if viewer.poll() is not None:
+                        raise RuntimeError("Rerun viewer exited during startup.")
                     return
             except OSError:
                 time.sleep(0.25)

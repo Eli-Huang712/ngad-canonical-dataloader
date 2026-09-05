@@ -1,5 +1,7 @@
 import importlib.util
 from pathlib import Path
+import signal
+import subprocess
 import sys
 
 import pytest
@@ -113,3 +115,67 @@ def test_browser_requests_only_one_episode_page(tmp_path: Path, monkeypatch) -> 
 
 def test_rendered_browser_javascript_preserves_newline_escape() -> None:
     assert "row.prompts.join('\\n')" in EPISODE_BROWSER.INDEX_HTML
+
+
+def test_viewer_process_group_is_terminated_even_after_parent_exit(monkeypatch) -> None:
+    calls = []
+
+    class FinishedViewer:
+        pid = 1234
+
+        @staticmethod
+        def wait(*, timeout):
+            calls.append(("wait", timeout))
+
+    monkeypatch.setattr(
+        EPISODE_BROWSER.os,
+        "killpg",
+        lambda process_group, sig: calls.append((process_group, sig)),
+    )
+
+    EpisodeBrowserState._stop_viewer_process_group(FinishedViewer())
+
+    assert calls == [(1234, signal.SIGTERM), ("wait", 10)]
+
+
+def test_viewer_process_group_escalates_after_timeout(monkeypatch) -> None:
+    calls = []
+
+    class StuckViewer:
+        pid = 5678
+        waits = 0
+
+        @classmethod
+        def wait(cls, *, timeout):
+            cls.waits += 1
+            calls.append(("wait", timeout))
+            if cls.waits == 1:
+                raise subprocess.TimeoutExpired("rerun", timeout)
+
+    monkeypatch.setattr(
+        EPISODE_BROWSER.os,
+        "killpg",
+        lambda process_group, sig: calls.append((process_group, sig)),
+    )
+
+    EpisodeBrowserState._stop_viewer_process_group(StuckViewer())
+
+    assert calls == [
+        (5678, signal.SIGTERM),
+        ("wait", 10),
+        (5678, signal.SIGKILL),
+        ("wait", 10),
+    ]
+
+
+def test_reload_waits_until_both_viewer_ports_are_closed(monkeypatch) -> None:
+    state = object.__new__(EpisodeBrowserState)
+    open_port_results = iter([[19001, 19002], [19002], []])
+    sleeps = []
+    monkeypatch.setattr(state, "_open_viewer_ports", lambda: next(open_port_results))
+    monkeypatch.setattr(EPISODE_BROWSER.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(EPISODE_BROWSER.time, "sleep", sleeps.append)
+
+    state._wait_for_viewer_ports_to_close()
+
+    assert sleeps == [0.25, 0.25]
