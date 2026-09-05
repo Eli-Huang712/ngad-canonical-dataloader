@@ -9,40 +9,52 @@
 
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-    echo "Usage: sbatch tools/serve_episode_slurm.sh <dataset-yaml> <episode-index> <output-dir>" >&2
+if [[ $# -ne 1 ]]; then
+    echo "Usage: sbatch tools/serve_episode_slurm.sh <viewer-catalog-yaml>" >&2
     exit 2
 fi
 
-dataset_config=$1
-episode_index=$2
-output_dir=$3
+viewer_catalog=$1
 repo_root=${SLURM_SUBMIT_DIR:?Submit this job from the repository root.}
 job_id=${SLURM_JOB_ID:?This script must run inside a Slurm job.}
 node_name=$(hostname -s)
-grpc_port=$((20000 + (job_id % 10000) * 2))
-web_port=$((grpc_port + 1))
-rrd_path="${output_dir}/episode_${episode_index}_job_${job_id}.rrd"
+selector_port=$((20000 + (job_id % 10000) * 3))
+grpc_port=$((selector_port + 1))
+web_port=$((selector_port + 2))
+temporary_root=${SLURM_TMPDIR:-/tmp}
+temporary_directory="${temporary_root}/ngad_episode_viewer_${job_id}"
+browser_pid=""
 
 umask 0027
-mkdir -p "$output_dir"
+mkdir -p "$temporary_directory"
 export PYTHONPATH="${repo_root}${PYTHONPATH:+:${PYTHONPATH}}"
 
-python "$repo_root/tools/visualize_episode.py" \
-    --dataset-config "$dataset_config" \
-    --episode-index "$episode_index" \
-    --output "$rrd_path"
+cleanup() {
+    if [[ -n "$browser_pid" ]] && kill -0 "$browser_pid" 2>/dev/null; then
+        kill "$browser_pid" 2>/dev/null || true
+        wait "$browser_pid" 2>/dev/null || true
+    fi
+    case "$temporary_directory" in
+        "${temporary_root}/ngad_episode_viewer_${job_id}")
+            rm -rf -- "$temporary_directory"
+            ;;
+        *)
+            echo "Refusing to remove unexpected temporary path: $temporary_directory" >&2
+            ;;
+    esac
+}
+trap cleanup EXIT INT TERM
 
-echo "RRD_READY=$rrd_path"
 echo "COMPUTE_NODE=$node_name"
+echo "SELECTOR_PORT=$selector_port"
 echo "WEB_PORT=$web_port"
 echo "GRPC_PORT=$grpc_port"
-echo "Run this command on your local machine:"
-echo "ssh -N -L ${web_port}:${node_name}:${web_port} -L ${grpc_port}:${node_name}:${grpc_port} h100"
-echo "Then open:"
-echo "http://127.0.0.1:${web_port}/?url=rerun%2Bhttp%3A%2F%2F127.0.0.1%3A${grpc_port}%2Fproxy"
 
-exec rerun "$rrd_path" \
-    --serve-web \
-    --web-viewer-port "$web_port" \
-    --port "$grpc_port"
+python "$repo_root/tools/episode_browser.py" \
+    --catalog "$viewer_catalog" \
+    --temporary-directory "$temporary_directory" \
+    --port "$selector_port" \
+    --rerun-web-port "$web_port" \
+    --rerun-grpc-port "$grpc_port" &
+browser_pid=$!
+wait "$browser_pid"

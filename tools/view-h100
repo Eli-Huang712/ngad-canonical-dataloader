@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+""":"
+Run the H100 episode browser, open it locally, and own its Slurm lifecycle.
+":"""
+
+set -euo pipefail
+
+h100_host=${NGAD_H100_HOST:-h100}
+remote_user=$(ssh "$h100_host" 'printf "%s" "$USER"')
+remote_repo=${NGAD_H100_REPO:-/gpfs/jiuquyun/projects/${remote_user}/ngad-canonical-dataloader}
+remote_artifacts="/gpfs/jiuquyun/projects/${remote_user}/ngad-canonical-dataloader-artifacts/episode-browser"
+job_id=""
+tunnel_pid=""
+cleaned=0
+
+cleanup() {
+    if [[ $cleaned -eq 1 ]]; then
+        return
+    fi
+    cleaned=1
+    if [[ -n "$tunnel_pid" ]] && kill -0 "$tunnel_pid" 2>/dev/null; then
+        kill "$tunnel_pid" 2>/dev/null || true
+        wait "$tunnel_pid" 2>/dev/null || true
+    fi
+    if [[ -n "$job_id" ]]; then
+        ssh "$h100_host" "scancel '$job_id'" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+case "$remote_repo" in
+    /gpfs/jiuquyun/projects/*/ngad-canonical-dataloader) ;;
+    *)
+        echo "NGAD_H100_REPO must point to a user's ngad-canonical-dataloader checkout." >&2
+        exit 2
+        ;;
+esac
+
+submission=$(ssh "$h100_host" "
+set -eu
+repo='$remote_repo'
+artifacts='$remote_artifacts'
+test -d \"\$repo/.git\"
+mkdir -p \"\$artifacts/logs\"
+cd \"\$repo\"
+job=\$(sbatch --parsable --output=\"\$artifacts/logs/%j.out\" tools/serve_episode_slurm.sh configs/episode_viewer_catalog.yaml)
+job=\${job%%;*}
+printf '%s|%s/logs/%s.out\\n' \"\$job\" \"\$artifacts\" \"\$job\"
+")
+job_id=${submission%%|*}
+remote_log=${submission#*|}
+if [[ ! "$job_id" =~ ^[0-9]+$ ]]; then
+    echo "Unexpected sbatch response: $submission" >&2
+    exit 1
+fi
+echo "Submitted H100 CPU viewer job $job_id"
+
+deadline=$((SECONDS + 600))
+job_log=""
+while (( SECONDS < deadline )); do
+    job_log=$(ssh "$h100_host" "test -r '$remote_log' && tail -n 200 '$remote_log' || true")
+    if grep -q '^SELECTOR_READY=' <<<"$job_log"; then
+        break
+    fi
+    state=$(ssh "$h100_host" "squeue -h -j '$job_id' -o %T || true")
+    if [[ -z "$state" ]]; then
+        echo "Viewer job exited before it became ready." >&2
+        echo "$job_log" >&2
+        exit 1
+    fi
+    printf '\rWaiting for job %s (%s)…' "$job_id" "$state"
+    sleep 2
+done
+printf '\n'
+if ! grep -q '^SELECTOR_READY=' <<<"$job_log"; then
+    echo "Timed out waiting for the H100 viewer service." >&2
+    exit 1
+fi
+
+compute_node=$(awk -F= '/^COMPUTE_NODE=/{value=$2} END{print value}' <<<"$job_log")
+selector_port=$(awk -F= '/^SELECTOR_PORT=/{value=$2} END{print value}' <<<"$job_log")
+web_port=$(awk -F= '/^WEB_PORT=/{value=$2} END{print value}' <<<"$job_log")
+grpc_port=$(awk -F= '/^GRPC_PORT=/{value=$2} END{print value}' <<<"$job_log")
+if [[ -z "$compute_node" || -z "$selector_port" || -z "$web_port" || -z "$grpc_port" ]]; then
+    echo "Viewer job did not publish complete connection metadata." >&2
+    echo "$job_log" >&2
+    exit 1
+fi
+
+ssh -N -o ExitOnForwardFailure=yes \
+    -L "${selector_port}:${compute_node}:${selector_port}" \
+    -L "${web_port}:${compute_node}:${web_port}" \
+    -L "${grpc_port}:${compute_node}:${grpc_port}" \
+    "$h100_host" &
+tunnel_pid=$!
+sleep 1
+if ! kill -0 "$tunnel_pid" 2>/dev/null; then
+    echo "Failed to establish the H100 port tunnel." >&2
+    exit 1
+fi
+
+viewer_url="http://127.0.0.1:${selector_port}/"
+open "$viewer_url"
+echo "Opened $viewer_url"
+echo "Press Ctrl-C here to stop job $job_id and delete its temporary RRD."
+wait "$tunnel_pid"

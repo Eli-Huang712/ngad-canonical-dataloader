@@ -145,6 +145,21 @@ future = sample["frame_offsets"] > 0
 Canonical mode 保留 `state[N,K,128]` 和 `action[N,K,128]`；如果模型需要
 `[N*K,128]`，由模型适配层 reshape。Video-only mode 不返回这两个字段。
 
+### 5. 在本机一行启动 H100 数据检查
+
+H100 端按约定将本仓库安装在
+`/gpfs/jiuquyun/projects/$USER/ngad-canonical-dataloader`，并安装
+`.[canonical,visualize]` 后，本机在仓库根目录执行：
+
+```bash
+./tools/view-h100
+```
+
+脚本会申请 CPU QoS、建立 SSH 端口转发并自动打开浏览器。页面提供 UMI、Hy-Embodied、
+LIBERO 的 Dataset 下拉列表和 Episode 下拉列表；`task_index` 与 prompt 只作为所选
+Episode 的辅助说明。每次选择会先生成完整 episode RRD，再嵌入 Rerun Viewer；切换
+Episode 或在终端按 `Ctrl-C` 结束任务时，临时 RRD 会被删除。
+
 ## 输入 ABI 简述
 
 支持两种 physical backend，输出相同：
