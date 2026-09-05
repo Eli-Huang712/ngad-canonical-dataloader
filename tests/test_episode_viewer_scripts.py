@@ -60,3 +60,10 @@ def test_episode_visualizer_groups_stereo_views_with_corresponding_tactile() -> 
     for expected_row in expected_rows:
         assert expected_row in script
     assert "rrb.Grid(*camera_views" not in script
+
+
+def test_episode_browser_forces_webgl_for_safari_compatibility() -> None:
+    script = (REPOSITORY_ROOT / "tools/remote/episode_browser.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"--renderer",\n                        "webgl",' in script

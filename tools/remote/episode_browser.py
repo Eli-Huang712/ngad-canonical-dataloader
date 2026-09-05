@@ -231,6 +231,8 @@ class EpisodeBrowserState:
                         str(self._web_port),
                         "--port",
                         str(self._grpc_port),
+                        "--renderer",
+                        "webgl",
                     ],
                     text=True,
                 )
