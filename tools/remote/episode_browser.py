@@ -270,7 +270,7 @@ class EpisodeBrowserState:
         return f"http://127.0.0.1:{self._web_port}/?url={quote(recording, safe='')}"
 
 
-INDEX_HTML = """<!doctype html>
+INDEX_HTML = r"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">

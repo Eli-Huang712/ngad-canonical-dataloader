@@ -73,3 +73,7 @@ def test_browser_close_deletes_current_rrd(tmp_path: Path, monkeypatch) -> None:
 
     assert not recording.exists()
     assert state.status() == {"state": "stopped"}
+
+
+def test_rendered_browser_javascript_preserves_newline_escape() -> None:
+    assert "row.prompts.join('\\n')" in EPISODE_BROWSER.INDEX_HTML
