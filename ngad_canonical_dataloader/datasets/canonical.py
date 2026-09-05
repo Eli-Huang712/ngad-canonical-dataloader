@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections.abc import Iterator
 import json
 import math
 import os
@@ -951,6 +952,39 @@ class NGADCanonicalDataset(Dataset):
 
     def __len__(self) -> int:
         return self._length
+
+    def iter_episode_samples(
+        self,
+        episode_index: int,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield existing ``__getitem__`` samples for one physical episode.
+
+        This read-only view only translates the episode boundary into the
+        Dataset's global sample indices. Sample construction remains exclusively
+        owned by ``__getitem__`` so training behavior and output ABI are unchanged.
+        """
+        matches = [
+            position
+            for position, episode in enumerate(self._episodes)
+            if int(episode["episode_index"]) == int(episode_index)
+        ]
+        if not matches:
+            raise KeyError(f"Episode {episode_index} is not part of this Dataset split.")
+        if len(matches) != 1:
+            raise ValueError(
+                f"Episode index {episode_index} is ambiguous across configured tables; "
+                "use a single-table Dataset YAML for episode visualization."
+            )
+
+        episode_position = matches[0]
+        start = (
+            0
+            if episode_position == 0
+            else self._episode_window_ends[episode_position - 1]
+        )
+        stop = min(self._episode_window_ends[episode_position], self._length)
+        for sample_index in range(start, stop):
+            yield self[sample_index]
 
     def normalization_stats(self) -> dict[str, Any] | None:
         """Return the exact canonical statistics serialized with a checkpoint."""
