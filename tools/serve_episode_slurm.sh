@@ -17,7 +17,7 @@ fi
 dataset_config=$1
 episode_index=$2
 output_dir=$3
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=${SLURM_SUBMIT_DIR:?Submit this job from the repository root.}
 job_id=${SLURM_JOB_ID:?This script must run inside a Slurm job.}
 node_name=$(hostname -s)
 grpc_port=$((20000 + (job_id % 10000) * 2))
