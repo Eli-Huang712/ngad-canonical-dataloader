@@ -44,3 +44,5 @@ def test_episode_visualizer_uses_only_frame_derived_timelines() -> None:
     assert '"episode_time"' not in script
     assert "action_timestamps" not in script
     assert "frame_timestamps" not in script
+    assert "if action_step < 0 or not valid[step]:" in script
+    assert "if frame_tick < 0:" in script

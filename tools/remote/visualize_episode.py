@@ -157,6 +157,10 @@ def _log_tcp_series(sample: dict[str, Any], ticks_per_frame: int) -> None:
     steps_per_frame = int(sample["data_info"]["action_steps_per_rgb_frame"])
     for step, step_offset in enumerate(step_offsets):
         action_step = frame_index * steps_per_frame + int(step_offset)
+        if action_step < 0 or not valid[step]:
+            # Padding before the first RGB frame must not extend Rerun's visible
+            # timeline into a range where no camera image exists yet.
+            continue
         rr.set_time(
             "frame_tick",
             sequence=action_step * ticks_per_frame // steps_per_frame,
@@ -200,6 +204,9 @@ def _log_tactile(sample: dict[str, Any], ticks_per_frame: int) -> None:
                 - ticks_per_frame
                 + (2 * slot + 1) * ticks_per_frame // (2 * tactile_steps)
             )
+            if frame_tick < 0:
+                # The first frame has no preceding in-episode tactile interval.
+                continue
             rr.set_time("frame_tick", sequence=frame_tick)
             if not valid[sensor_index, slot]:
                 rr.log(f"/tactile/{sensor_name}", rr.Clear(recursive=True))
