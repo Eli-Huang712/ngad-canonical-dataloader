@@ -93,9 +93,15 @@ def _build_blueprint(camera_keys: tuple[str, ...]) -> rrb.Blueprint:
         rrb.Vertical(
             rrb.Horizontal(
                 rrb.Grid(*camera_views, grid_columns=3, name="Six camera views"),
-                rrb.TextDocumentView(
-                    origin="/episode",
-                    name="Prompt and metadata",
+                rrb.Vertical(
+                    rrb.TextDocumentView(
+                        origin="/episode/prompt",
+                        name="Prompt",
+                    ),
+                    rrb.TextDocumentView(
+                        origin="/episode/metadata",
+                        name="Metadata",
+                    ),
                 ),
                 column_shares=[3, 1],
             ),
