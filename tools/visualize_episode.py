@@ -93,7 +93,10 @@ def _build_blueprint(camera_keys: tuple[str, ...]) -> rrb.Blueprint:
         rrb.Vertical(
             rrb.Horizontal(
                 rrb.Grid(*camera_views, grid_columns=3, name="Six camera views"),
-                rrb.TextDocumentView(origin="/episode", name="Prompt and metadata"),
+                rrb.TextDocumentView(
+                    origin="/episode",
+                    name="Prompt and metadata",
+                ),
                 column_shares=[3, 1],
             ),
             rrb.Horizontal(
@@ -108,7 +111,11 @@ def _build_blueprint(camera_keys: tuple[str, ...]) -> rrb.Blueprint:
                 ),
                 column_shares=[1, 1],
             ),
-            row_shares=[2, 1],
+            rrb.TextLogView(
+                origin="/annotations",
+                name="Task annotations",
+            ),
+            row_shares=[4, 2, 1],
         ),
         collapse_panels=True,
     )
@@ -276,6 +283,13 @@ def log_episode(dataset_config: Path, episode_index: int, output: Path) -> None:
             rr.log(
                 "/episode/prompt",
                 rr.TextDocument(prompt, media_type="text/markdown"),
+            )
+            rr.log(
+                "/annotations/task_transitions",
+                rr.TextLog(
+                    f"task_index={int(sample['data_info']['task_index'])}: {prompt}",
+                    level="INFO",
+                ),
             )
             previous_prompt = prompt
         camera_mask = sample["camera_mask"][0].detach().cpu().tolist()
