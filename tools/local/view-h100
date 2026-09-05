@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-""":"
-Run the H100 episode browser, open it locally, and own its Slurm lifecycle.
-":"""
+# Submit the H100 episode browser, open it locally, and own its Slurm lifecycle.
 
 set -euo pipefail
 

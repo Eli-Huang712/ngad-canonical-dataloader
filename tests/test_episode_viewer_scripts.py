@@ -29,5 +29,7 @@ def test_slurm_service_uses_disposable_selector_path() -> None:
 
 def test_local_launcher_accepts_only_personal_project_checkouts() -> None:
     script = (REPOSITORY_ROOT / "tools/local/view-h100").read_text(encoding="utf-8")
+    assert script.splitlines()[1].startswith("#")
+    assert '""":' not in script
     assert "NGAD_H100_REPO" in script
     assert '"/gpfs/jiuquyun/projects/${remote_user}/"*' in script
